@@ -3,9 +3,17 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LyricWord {
+    /// An explicit acoustic point cue, distinct from a missing/unbounded end.
+    #[serde(default)]
+    pub point: bool,
     pub text: String,
     pub start: f32,
     pub end: f32,
+}
+impl LyricWord {
+    pub fn is_timed(&self) -> bool {
+        self.end > self.start || (self.point && self.end == self.start)
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LyricLine {
@@ -73,6 +81,7 @@ pub fn parse_lrc(input: &str) -> Vec<LyricLine> {
             let words = words
                 .iter()
                 .map(|(text, begin, end)| LyricWord {
+                    point: false,
                     text: text.clone(),
                     start: seconds(begin + shift),
                     end: end.map(|end| seconds(end + shift)).unwrap_or(-1.0),

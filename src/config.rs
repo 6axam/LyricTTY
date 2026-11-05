@@ -26,7 +26,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             audio_alignment: true,
-            prepare_before_playback: true,
+            prepare_before_playback: false,
             fps: 60,
             pixel_lyrics: true,
             scroll_duration_ms: 850,

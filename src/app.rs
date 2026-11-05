@@ -1404,22 +1404,14 @@ pub fn doctor() -> Result<()> {
     let root = dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("lyrictty/alignment");
-    for model in ["vosk-model-small-ru-0.22", "vosk-model-small-en-us-0.15"] {
-        println!(
-            "{} Audio words: {model}",
-            if root
-                .join("models")
-                .join(model)
-                .join("am/final.mdl")
-                .exists()
-                && root.join("venv/bin/python").exists()
-            {
-                "✓"
-            } else {
-                "!"
-            }
-        );
-    }
+    println!(
+        "{} Stable-ts CPU alignment (base)",
+        if root.join("models/stable-ts/base.pt").exists() && root.join("venv/bin/python").exists() {
+            "✓"
+        } else {
+            "!"
+        }
+    );
     println!("✓ Lyrics: local enhanced LRC / Lyricsfile + LRCLIB\n! YouTube Music account integration unavailable; public URLs use yt-dlp\n✓ No account required");
     Ok(())
 }

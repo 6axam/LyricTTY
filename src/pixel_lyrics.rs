@@ -330,7 +330,7 @@ impl PixelLyrics {
             write!(self.pending,"\x1b[{};{}H\x1b_Ga=p,i={id},p=1,x=0,y={crop_y},w={width},h={height},X={},Y={},C=1,z=2,q=2\x1b\\",y/u32::from(self.cell.1)+1,x/u32::from(self.cell.0)+1,x%u32::from(self.cell.0),y%u32::from(self.cell.1))?;
             line.visible = true;
             for word in &line.words {
-                if lyric.words[word.index].end <= lyric.words[word.index].start {
+                if !lyric.words[word.index].is_timed() {
                     continue;
                 }
                 let region = pixel_hit(
@@ -439,7 +439,7 @@ fn paint_line(
         let mut boundary = None;
         if let Some(wi) = glyph.word {
             let w = &lyric.words[wi];
-            if w.end <= w.start {
+            if !w.is_timed() {
                 color = rgb(palette.fg);
             } else if position >= w.end {
                 color = rgb(fill_color);

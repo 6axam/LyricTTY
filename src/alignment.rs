@@ -142,9 +142,9 @@ impl AlignmentHandle {
                                 base.words = saved.words;
                             }
                         }
-                        publish(events, &request.key, &content);
-                        if cached.prepared && matched_words(&content) > 0 {
-                            report(events, &request.key, "По словам · готовая разметка из кэша");
+                        if cached.prepared && content.lines.iter().all(complete) {
+                            publish(events, &request.key, &content);
+                            report(events, &request.key, "По словам · полная разметка из кэша");
                             return Ok(());
                         }
                     }
@@ -158,23 +158,12 @@ impl AlignmentHandle {
         let root = dirs::data_local_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("lyrictty/alignment");
-        let cyrillic = content
-            .lines
-            .iter()
-            .flat_map(|l| l.text.chars())
-            .filter(|c| matches!(*c as u32, 0x0400..=0x04ff))
-            .count();
-        let model_name = if cyrillic > 3 {
-            "vosk-model-small-ru-0.22"
-        } else {
-            "vosk-model-small-en-us-0.15"
-        };
         let python = root.join("venv/bin/python");
-        let model = root.join("models").join(model_name);
+        let models = root.join("models/stable-ts");
+        let model_name = "base";
         anyhow::ensure!(
-            python.exists() && model.join("am/final.mdl").exists(),
-            "нужна небольшая модель; запусти scripts/setup-alignment.sh {}",
-            if cyrillic > 3 { "ru" } else { "en" }
+            python.exists() && models.join("base.pt").exists(),
+            "нужен stable-ts; запусти scripts/setup-alignment.sh base"
         );
         let temp = tempfile::tempdir()?;
         let helper = temp.path().join("align.py");
@@ -199,7 +188,9 @@ impl AlignmentHandle {
             .arg("--request")
             .arg(input)
             .arg("--model")
-            .arg(model)
+            .arg(model_name)
+            .arg("--models-dir")
+            .arg(models)
             .env("OMP_NUM_THREADS", "1")
             .env("OPENBLAS_NUM_THREADS", "1")
             .env("MKL_NUM_THREADS", "1")
@@ -229,7 +220,7 @@ impl AlignmentHandle {
         let mut prepared = false;
         while !self.cancelled(request) {
             anyhow::ensure!(
-                started.elapsed() < Duration::from_secs(180),
+                started.elapsed() < Duration::from_secs(300),
                 "превышено время подготовки аудио"
             );
             for line in lines_rx.try_iter() {
@@ -252,6 +243,9 @@ impl AlignmentHandle {
                         "decoding_audio" => "Подготавливаю звук для анализа…",
                         "loading_model" => "Загружаю модель…",
                         "aligning_lyrics" => "Сопоставляю слова с аудио…",
+                        retry if retry.starts_with("retrying_line_") => {
+                            "Уточняю тайминги сложной строки…"
+                        }
                         _ => "Подготавливаю тайминги слов…",
                     };
                     report(events, &request.key, message);
@@ -265,11 +259,11 @@ impl AlignmentHandle {
                 let Some(base) = content.lines.get_mut(index) else {
                     continue;
                 };
-                if !valid_words(base, &update.words) {
+                if !valid_words(base, &update.words) || !all_tokens_timed(&update.words) {
                     continue;
                 }
-                let old = base.words.iter().filter(|w| w.end > w.start).count();
-                let new = update.words.iter().filter(|w| w.end > w.start).count();
+                let old = base.words.iter().filter(|w| w.is_timed()).count();
+                let new = update.words.iter().filter(|w| w.is_timed()).count();
                 if new == 0 || new < old || update.words == base.words {
                     continue;
                 }
@@ -283,6 +277,7 @@ impl AlignmentHandle {
                     &request.key,
                     &format!("Подготавливаю разметку · {matched} слов"),
                 );
+                publish(events, &request.key, &content);
                 save(cache, &path, &content, false)?;
             }
             if let Some(status) = child.0.try_wait()? {
@@ -307,8 +302,8 @@ impl AlignmentHandle {
             return Ok(());
         }
         anyhow::ensure!(
-            prepared && matched_words(&content) > 0,
-            "не удалось надёжно привязать слова к этой записи"
+            prepared && content.lines.iter().all(complete),
+            "полная разметка не получена: часть слов не имеет корректных таймингов"
         );
         save(cache, &path, &content, true)?;
         publish(events, &request.key, &content);
@@ -325,7 +320,7 @@ fn matched_words(content: &LyricsContent) -> usize {
         .lines
         .iter()
         .flat_map(|l| &l.words)
-        .filter(|w| w.end > w.start)
+        .filter(|w| w.is_timed())
         .count()
 }
 fn save(cache: &Path, path: &Path, content: &LyricsContent, prepared: bool) -> anyhow::Result<()> {
@@ -340,14 +335,15 @@ fn save(cache: &Path, path: &Path, content: &LyricsContent, prepared: bool) -> a
     file.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
+fn all_tokens_timed(words: &[crate::lyrics::LyricWord]) -> bool {
+    words
+        .iter()
+        .filter(|w| w.text.chars().any(char::is_alphanumeric))
+        .all(|w| w.is_timed())
+}
 fn complete(line: &LyricLine) -> bool {
     !line.text.chars().any(char::is_alphanumeric)
-        || (!line.words.is_empty()
-            && line
-                .words
-                .iter()
-                .filter(|w| w.text.chars().any(char::is_alphanumeric))
-                .all(|w| w.end > w.start))
+        || (valid_words(line, &line.words) && all_tokens_timed(&line.words))
 }
 fn valid_words(line: &LyricLine, words: &[crate::lyrics::LyricWord]) -> bool {
     !words.is_empty()
@@ -358,11 +354,12 @@ fn valid_words(line: &LyricLine, words: &[crate::lyrics::LyricWord]) -> bool {
                 && w.end.is_finite()
                 && w.start >= line.start
                 && w.end >= w.start
+                && (!w.point || w.end == w.start)
                 && w.end <= line.end
         })
         && words
             .iter()
-            .filter(|w| w.end > w.start)
+            .filter(|w| w.is_timed())
             .map(|w| w.start)
             .collect::<Vec<_>>()
             .windows(2)
@@ -370,7 +367,7 @@ fn valid_words(line: &LyricLine, words: &[crate::lyrics::LyricWord]) -> bool {
 }
 fn publish(events: &Sender<AssetEvent>, key: &str, content: &LyricsContent) {
     let mut content = content.clone();
-    content.quality = "Audio word timing · prepared offline".into();
+    content.quality = "Stable-ts alignment · original text preserved".into();
     let _ = events.send(AssetEvent::Lyrics {
         key: key.into(),
         content,

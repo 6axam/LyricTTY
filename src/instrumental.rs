@@ -53,7 +53,7 @@ impl InstrumentalState {
                         .iter()
                         .filter(|w| w.text.chars().any(char::is_alphanumeric))
                         .collect();
-                    if !lexical.is_empty() && lexical.iter().all(|w| w.end > w.start) {
+                    if !lexical.is_empty() && lexical.iter().all(|w| w.is_timed()) {
                         lexical.iter().map(|w| w.end).fold(l.start, f32::max)
                     } else {
                         // Partial acoustic cues do not establish a vocal endpoint.

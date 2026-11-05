@@ -205,7 +205,7 @@ fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) ->
             let mut filled_width = 0;
             for g in word.text.graphemes(true) {
                 let size = g.width().max(1);
-                let color = if word.end <= word.start {
+                let color = if !word.is_timed() {
                     palette.fg
                 } else if position >= word.end {
                     fill_color
@@ -219,7 +219,7 @@ fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) ->
                 } else {
                     palette.fg
                 };
-                push(g, color, (word.end > word.start).then_some(word.start));
+                push(g, color, word.is_timed().then_some(word.start));
                 filled_width += size;
             }
         }
@@ -321,11 +321,13 @@ mod tests {
             text: "Привет 世界".into(),
             words: vec![
                 LyricWord {
+                    point: false,
                     text: "Привет ".into(),
                     start: 0.0,
                     end: 2.0,
                 },
                 LyricWord {
+                    point: false,
                     text: "世界".into(),
                     start: 2.0,
                     end: 4.0,

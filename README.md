@@ -85,18 +85,20 @@ lyrictty --demo
 
 The included [authored timing fixture](examples/demo.lrc) has real explicit word cues, Cyrillic, and an instrumental gap. It is deliberately silent and labeled as a demo. For music, pass your own timestamped file with `--lyrics` alongside a native URL or active browser source. LRCLIB word timing is used only when the server supplies a valid Lyricsfile; most records remain line-synced.
 
-### Learn word timings from playback
+### Align the existing lyrics to audio
 
 ```bash
-./scripts/setup-alignment.sh ru  # Small Russian Vosk model; use en for English
+./scripts/setup-alignment.sh base  # Multilingual stable-ts alignment, CPU only
 lyrictty
 ```
 
-Requires `ffmpeg`, `ffprobe`, and `yt-dlp` for public remote audio. LyricTTY obtains a separate audio file and prepares the complete word timeline on a background worker before playback. Local files and direct source URLs are preferred. If browser metadata has no source URL, a bounded public lookup requires matching artist/title/version and duration; uncertain recordings are rejected. No browser cookies or account credentials are used.
+Requires `ffmpeg`, `ffprobe`, and `yt-dlp` for public remote audio. LyricTTY obtains a separate audio file and aligns the existing text to audio on a background worker. Local files and direct source URLs are preferred. If browser metadata has no source URL, a bounded public lookup requires matching artist/title/version and duration; uncertain recordings are rejected. No browser cookies or account credentials are used.
 
-By default `prepare_before_playback = true` pauses the selected playing source while preparing, then resumes its saved position. Native files load paused. Press Space to bypass waiting; `prepare_before_playback = false` leaves music playing while preparation continues independently. Failure resumes intended playback with the original lyrics and a visible error, without silently switching to delayed live recognition.
+Music starts immediately by default (`prepare_before_playback = false`). Until word cues are ready, line lyrics remain available. Completed lines are published incrementally; a full prepared cache is accepted only when every lexical word has a finite acoustic interval or an explicit point cue for a short particle and the original text is reconstructed exactly. A partial result is never labeled 100% prepared.
 
-Prepared timelines are cached, including partially matched words, so subsequent plays do not run recognition. Only acoustically matched words are filled; singing, loud accompaniment, incorrect lyrics and mismatched recordings can reduce coverage. The recognizer uses a small local Vosk model, low priority and one CPU with throttling; no GPU is needed. Russian/English model downloads are about 45/40 MB and use roughly 300 MB RAM while loaded. Transient audio is deleted after preparation; no audio is uploaded or captured from the microphone. Disable preparation with `audio_alignment = false` and restart.
+Stable-ts `align_words()` uses the existing line timestamps as anchors, preserving all original words, spelling, whitespace and punctuation. Failed lines are retried independently. Missing word cues produce a visible coverage error rather than uniform fabricated timestamps. A collapsed cue for a short particle (up to two letters), bracketed by timed neighbors, stays an explicit point cue; no duration is invented for it. Complete text coverage does not guarantee perfect acoustic timing: singing, accompaniment and inaccurate source line boundaries can still impair alignment.
+
+The original multilingual Whisper base model runs locally in float32 on one CPU at low priority. No GPU is used. This runtime/model is larger than the old Vosk setup; installation is a one-time download. Old Vosk caches are kept separate and never accepted as complete stable-ts results. Prepared timelines are reused without loading the model. Temporary audio is deleted after analysis; no audio is uploaded or captured from the microphone. Set `audio_alignment = false` to disable analysis, or explicitly opt into waiting with `prepare_before_playback = true`.
 
 [Kitty pixel scrolling — actual 60 FPS recording](assets/smooth-lyrics.mp4)
 

@@ -287,6 +287,7 @@ fn lyricsfile_document(mut file: Lyricsfile) -> Result<LyricsDocument> {
                 .or(line.end_ms.filter(|e| *e >= word.start_ms))
                 .unwrap_or(word.start_ms);
             words.push(LyricWord {
+                point: false,
                 text: word.text.clone(),
                 start: milliseconds(word.start_ms),
                 end: milliseconds(word_end),

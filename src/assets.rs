@@ -33,7 +33,7 @@ impl AssetService {
     pub fn start(config: Config, cache: PathBuf) -> Self {
         let (requests, rx) = mpsc::channel::<Request>();
         let (tx, events) = mpsc::channel();
-        let alignment = AlignmentHandle::start(cache.join("audio-prepared-v1"), tx.clone());
+        let alignment = AlignmentHandle::start(cache.join("stable-words-v1"), tx.clone());
         let align_worker = alignment.clone();
         // Dedicated workers let a slow lyrics server coexist with a fast cover.
         let (art_tx, art_rx) = mpsc::channel::<(String, String)>();

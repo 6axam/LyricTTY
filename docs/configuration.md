@@ -4,7 +4,7 @@ Location: `$XDG_CONFIG_HOME/lyrictty/config.toml`, normally `~/.config/lyrictty/
 
 ```toml
 audio_alignment = true
-prepare_before_playback = true
+prepare_before_playback = false
 fps = 60
 pixel_lyrics = true
 scroll_duration_ms = 850
@@ -22,10 +22,10 @@ FPS is clamped to 10–60. `pixel_lyrics` enables pixel-positioned text in compa
 
 Positive `lyrics_offset_ms` advances highlighting without changing playback; negative values delay it. `scroll_duration_ms = 0` is instant. Low-data mode skips artwork retrieval; setting `online_lyrics = false` disables remote lyrics while preserving explicit local files. Network-related setting changes take effect on restart.
 
-Caches live under `$XDG_CACHE_HOME/lyrictty/{lyrics,artwork,audio-prepared-v1}`. Lyrics keys are hashed, positive cache TTL is seven days and missing records use a shorter TTL. Provider errors are not cached as definitive misses. File-backed local lyrics are reread on track changes. Artwork is bounded in download and decoded dimensions; no account secrets are stored.
+Caches live under `$XDG_CACHE_HOME/lyrictty/{lyrics,artwork,stable-words-v1}`. Lyrics keys are hashed, positive cache TTL is seven days and missing records use a shorter TTL. Provider errors are not cached as definitive misses. File-backed local lyrics are reread on track changes. Artwork is bounded in download and decoded dimensions; no account secrets are stored.
 
 Native queue/source/position persistence is not yet implemented. The application owns only the mpv process it starts, and terminates/reaps it when exiting; it never terminates external MPRIS players.
 
-`audio_alignment` prepares missing word times from a separately loaded audio file using the optional small Vosk models installed by `scripts/setup-alignment.sh ru` or `en`. Restart after changing it. The private runtime/models live under `$XDG_DATA_HOME/lyrictty/alignment`. A prepared cached song starts no recognizer. Temporary decoded audio is deleted after analysis; only matched timestamps are cached. No audio is uploaded or recorded from the microphone.
+`audio_alignment` aligns existing lyrics against a separately loaded audio file with stable-ts `align_words()` and the multilingual Whisper base model. Install once using `scripts/setup-alignment.sh base`; `ru`/`en` remain aliases for the same multilingual setup. Runtime/models live under `$XDG_DATA_HOME/lyrictty/alignment`, with the checkpoint at `models/stable-ts/base.pt`. A fully prepared cache starts no model. Temporary decoded audio is deleted after analysis; nothing is uploaded or recorded from the microphone.
 
-`prepare_before_playback = true` waits for full-track analysis before resuming the selected source; native files load paused. Space overrides the wait. Set it to `false` to continue playing while preparing independently in the background. Errors release a waiting player and show the reason. Public URL preparation uses `yt-dlp`, `ffmpeg`, and `ffprobe`; fallback search requires artist/title/version and duration agreement.
+`prepare_before_playback = false` is the default: music continues while alignment runs independently. Complete lines are displayed as they become ready. The full cache is marked prepared only with 100% original lexical-word coverage and exact text reconstruction; timing accuracy is not guaranteed. Failed lines are retried, and unresolved words produce a visible error instead of fabricated timings. Explicit point cues for short particles are supported separately from words with missing timing; no uniform duration is manufactured. Explicitly set `prepare_before_playback = true` to pause until preparation; Space overrides waiting and failure releases playback. Source audio requires `yt-dlp`, `ffmpeg`, and `ffprobe` for public URLs; fallback search validates recording identity and duration.
