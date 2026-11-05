@@ -47,6 +47,7 @@ pub struct App {
     manual_source: Option<String>,
     active_source: Option<String>,
     track_key: String,
+    asset_key: String,
     debug: bool,
     scroll: ScrollState,
     hits: Vec<Hit>,
@@ -86,6 +87,7 @@ impl App {
             manual_source: None,
             active_source: None,
             track_key: String::new(),
+            asset_key: String::new(),
             debug,
             scroll: ScrollState::default(),
             hits: Vec::new(),
@@ -189,10 +191,14 @@ impl App {
         let key = self
             .source()
             .map(|s| {
-                format!(
-                    "{}:{}:{}:{}",
-                    s.source_id, s.track.id, s.track.artist, s.track.title
-                )
+                serde_json::to_string(&(
+                    &s.source_id,
+                    &s.track.id,
+                    &s.track.artist,
+                    &s.track.title,
+                    &s.track.album,
+                ))
+                .unwrap_or_default()
             })
             .unwrap_or_default();
         if key != self.track_key {
@@ -207,10 +213,31 @@ impl App {
                 theme::Palette::default(),
                 self.config.theme_transition_ms as f32 / 1000.0,
             );
+        }
+        // Browsers and extractors can publish artwork/duration after the title.
+        // Refresh assets without resetting the lyric viewport for the same song.
+        let asset_key = self
+            .source()
+            .map(|s| {
+                serde_json::to_string(&(
+                    &key,
+                    s.track.duration.round() as i64,
+                    &s.track.artwork_url,
+                ))
+                .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        if asset_key != self.asset_key {
+            self.asset_key = asset_key.clone();
             if let Some(s) = self.source() {
                 if !s.track.title.is_empty() {
                     if let Some(worker) = &self.asset_request {
-                        worker.request(key, s.track.clone(), self.local_lyrics.clone(), self.demo);
+                        worker.request(
+                            asset_key,
+                            s.track.clone(),
+                            self.local_lyrics.clone(),
+                            self.demo,
+                        );
                     }
                 }
             }
@@ -251,12 +278,12 @@ impl App {
         }
         for event in assets {
             match event {
-                lyrictty::assets::AssetEvent::Lyrics { key, content } if key == self.track_key => {
+                lyrictty::assets::AssetEvent::Lyrics { key, content } if key == self.asset_key => {
                     self.status = format!("{} · s sources · o open · ? help", content.quality);
                     self.content = content;
                     self.dirty = true;
                 }
-                lyrictty::assets::AssetEvent::Artwork { key, artwork } if key == self.track_key => {
+                lyrictty::assets::AssetEvent::Artwork { key, artwork } if key == self.asset_key => {
                     self.theme.set(
                         artwork.palette,
                         self.config.theme_transition_ms as f32 / 1000.0,
@@ -1156,5 +1183,26 @@ mod tests {
         app.overlay = Overlay::Open;
         app.handle_paste("https://example.test/q\n");
         assert_eq!(app.url_input, "https://example.test/q");
+    }
+    #[test]
+    fn late_artwork_invalidates_assets_without_clearing_existing_lyrics() {
+        let mut app = App::new(Config::default(), false);
+        let mut source = PlaybackSnapshot {
+            source_id: "mock".into(),
+            track: lyrictty::playback::Track {
+                id: "track".into(),
+                title: "song".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        app.update_sources(vec![source.clone()]);
+        let old_asset_key = app.asset_key.clone();
+        app.content.lines = lyrics::parse_lrc("[00:00]existing lyrics");
+        source.track.artwork_url = Some("https://art.invalid/cover.png".into());
+        source.track.duration = 120.0;
+        app.update_sources(vec![source]);
+        assert_ne!(old_asset_key, app.asset_key);
+        assert_eq!(app.content.lines.len(), 1);
     }
 }
