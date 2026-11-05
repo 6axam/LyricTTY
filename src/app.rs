@@ -64,6 +64,7 @@ pub struct App {
     graphical_panel: bool,
     instrumental: InstrumentalState,
     cava: lyrictty::cava::Cava,
+    spectrum_visible: bool,
     manual_line: Option<usize>,
     plain_scroll: u16,
     manual_until: Instant,
@@ -118,6 +119,7 @@ impl App {
             graphical_panel: false,
             instrumental: InstrumentalState::default(),
             cava: lyrictty::cava::Cava::default(),
+            spectrum_visible: false,
             manual_line: None,
             plain_scroll: 0,
             manual_until: Instant::now(),
@@ -579,9 +581,15 @@ impl App {
             self.config.instrumental_fade_secs,
             self.content.instrumental,
         );
+        // Separate thresholds keep seek/resync jitter from toggling renderers.
+        if self.instrumental.intensity >= 0.12 {
+            self.spectrum_visible = true;
+        } else if self.instrumental.intensity <= 0.02 {
+            self.spectrum_visible = false;
+        }
         self.cava.update(
             !self.demo
-                && self.instrumental.intensity > 0.01
+                && self.spectrum_visible
                 && self
                     .source()
                     .is_some_and(|s| s.status == PlaybackStatus::Playing),
@@ -966,7 +974,9 @@ impl App {
                 );
             }
         }
-        if self.content.lines.is_empty() {
+        if self.spectrum_visible {
+            // Only the spectrum is painted in this pane for this frame.
+        } else if self.content.lines.is_empty() {
             let message = if !self.content.plain.is_empty() {
                 self.content.plain.clone()
             } else if self.content.instrumental {
@@ -991,10 +1001,7 @@ impl App {
             faded.muted = theme::mix(p.muted, p.bg, self.instrumental.intensity * 0.93);
             faded.accent = theme::mix(p.accent, p.bg, self.instrumental.intensity * 0.93);
             let position = self.lyric_position();
-            if self.config.pixel_lyrics
-                && self.overlay == Overlay::None
-                && self.instrumental.intensity <= 0.01
-            {
+            if self.config.pixel_lyrics && self.overlay == Overlay::None && !self.spectrum_visible {
                 if let Some(renderer) = &mut self.pixel_lyrics {
                     if renderer.supports(&self.content.lines) {
                         if let Ok(hits) = renderer.prepare(
@@ -1027,7 +1034,7 @@ impl App {
                 renderer.hide();
             }
         }
-        if self.instrumental.intensity > 0.01 {
+        if self.spectrum_visible {
             self.draw_instrumental(f, inner);
         }
         let position = self.position();

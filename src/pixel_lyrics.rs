@@ -144,8 +144,29 @@ impl PixelLyrics {
         if self.width == width && self.karaoke == karaoke && self.content == content {
             return;
         }
-        self.clear_images();
-        self.lines.clear();
+        let stable_geometry = self.width == width
+            && self.karaoke == karaoke
+            && self.content.len() == content.len()
+            && self
+                .content
+                .iter()
+                .zip(content)
+                .all(|(a, b)| a.text == b.text);
+        let same_parts: Vec<bool> = self
+            .content
+            .iter()
+            .zip(content)
+            .map(|(a, b)| {
+                a.words
+                    .iter()
+                    .map(|w| &w.text)
+                    .eq(b.words.iter().map(|w| &w.text))
+            })
+            .collect();
+        if !stable_geometry {
+            self.clear_images();
+        }
+        let mut previous = std::mem::take(&mut self.lines).into_iter();
         self.content = content.to_vec();
         self.width = width;
         self.karaoke = karaoke;
@@ -156,7 +177,7 @@ impl PixelLyrics {
         }
         let row_height = (px * 1.45).ceil();
         let mut offset = 0.0;
-        for line in content {
+        for (index, line) in content.iter().enumerate() {
             let mut glyphs = Vec::new();
             let mut words: Vec<WordBox> = Vec::new();
             let mut row_widths = Vec::new();
@@ -252,14 +273,22 @@ impl PixelLyrics {
                 }
             }
             let height = (y + row_height).ceil() as u32;
+            let old = previous.next().filter(|_| stable_geometry);
+            let uploaded = old.as_ref().is_some_and(|old| old.uploaded);
+            let visible = old.as_ref().is_some_and(|old| old.visible);
+            let style = if same_parts.get(index) == Some(&true) {
+                old.map(|old| old.style).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             self.lines.push(RasterLine {
                 glyphs,
                 words,
                 height,
                 offset,
-                style: Vec::new(),
-                uploaded: false,
-                visible: false,
+                style,
+                uploaded,
+                visible,
             });
             offset += height as f32 + row_height * 0.75;
         }
@@ -413,6 +442,7 @@ fn line_style(
         let progress = progress(w.start, w.end, position);
         style.extend_from_slice(&((progress * width * 4.0).floor() as u32).to_le_bytes());
         style.push(u8::from(position >= w.end));
+        style.push(u8::from(w.is_timed()));
     }
     style
 }
