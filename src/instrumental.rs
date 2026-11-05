@@ -45,10 +45,22 @@ impl InstrumentalState {
             .unwrap_or(duration);
         let end = previous
             .map(|l| {
-                l.words
-                    .last()
-                    .map(|w| w.end)
-                    .unwrap_or(l.end.min(l.start + 4.0))
+                if l.words.is_empty() {
+                    l.end.min(l.start + 4.0)
+                } else {
+                    let lexical: Vec<_> = l
+                        .words
+                        .iter()
+                        .filter(|w| w.text.chars().any(char::is_alphanumeric))
+                        .collect();
+                    if !lexical.is_empty() && lexical.iter().all(|w| w.end > w.start) {
+                        lexical.iter().map(|w| w.end).fold(l.start, f32::max)
+                    } else {
+                        // Partial acoustic cues do not establish a vocal endpoint.
+                        // Untimed whitespace must never fade the entire lyric pane.
+                        l.end
+                    }
+                }
             })
             .unwrap_or(0.0);
         if !lines.is_empty() && next - end >= threshold && position >= end && position <= next {

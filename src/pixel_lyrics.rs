@@ -438,11 +438,11 @@ fn paint_line(
         if let Some(wi) = glyph.word {
             let w = &lyric.words[wi];
             if w.end <= w.start {
-                color = rgb(palette.muted);
-            } else if position >= w.end && position < lyric.end {
+                color = rgb(palette.fg);
+            } else if position >= w.end {
                 color = rgb(fill_color);
             } else if position < w.end {
-                color = rgb(palette.muted);
+                color = rgb(palette.fg);
                 if position >= w.start {
                     let regions: Vec<_> = line.words.iter().filter(|r| r.index == wi).collect();
                     let mut fill = (progress(w.start, w.end, position)
@@ -476,7 +476,7 @@ fn paint_line(
                 }
                 let color = if let Some(edge) = boundary {
                     rgb(crate::theme::mix(
-                        palette.muted,
+                        palette.fg,
                         fill_color,
                         (edge - x as f32).clamp(0.0, 1.0),
                     ))

@@ -212,22 +212,18 @@ fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) ->
             for g in word.text.graphemes(true) {
                 let size = g.width().max(1);
                 let color = if word.end <= word.start {
-                    palette.muted
+                    palette.fg
                 } else if position >= word.end {
-                    if position < line.end {
-                        fill_color
-                    } else {
-                        palette.fg
-                    }
+                    fill_color
                 } else if Some(wi) == active {
                     mix(
-                        palette.muted,
+                        palette.fg,
                         fill_color,
                         ((progress * count as f32 - filled_width as f32) / size as f32)
                             .clamp(0.0, 1.0),
                     )
                 } else {
-                    palette.muted
+                    palette.fg
                 };
                 push(g, color, (word.end > word.start).then_some(word.start));
                 filled_width += size;

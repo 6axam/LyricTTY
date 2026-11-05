@@ -288,7 +288,10 @@ class Aligner:
         if not sink or "\n" in sink or "\r" in sink:
             raise ValueError("pactl did not return a default output sink")
         line = self.lines[index]
-        grammar = list(dict.fromkeys(line.expected)) + ["[unk]"]
+        # Follow the known word order; suffixes allow starting mid-line.
+        # A bag of isolated words discarded exactly the sequence we need.
+        grammar = [" ".join(line.expected[start:])
+                   for start in range(min(len(line.expected), 80))] + ["[unk]"]
         self.recognizer = self.recognizer_class(
             self.model, 16000, json.dumps(grammar, ensure_ascii=False))
         self.recognizer.SetWords(True)
