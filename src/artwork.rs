@@ -37,6 +37,19 @@ impl ArtworkProvider {
         })
     }
     pub fn load(&self, url: &str) -> Result<Artwork> {
+        let parsed = Url::parse(url)?;
+        if let Some(better) = higher_quality_url(&parsed) {
+            if let Ok(art) = self.load_url(&better) {
+                // Some CDNs return a tiny placeholder for unavailable large images.
+                if art.image.width().min(art.image.height()) >= 300 {
+                    return Ok(art);
+                }
+            }
+        }
+        self.load_url(&parsed)
+    }
+    fn load_url(&self, parsed: &Url) -> Result<Artwork> {
+        let url = parsed.as_str();
         let key = format!("{:x}", Sha256::digest(url.as_bytes()));
         let path = self.cache.join(key);
         if let Ok(bytes) = fs::read(&path) {
@@ -45,7 +58,6 @@ impl ArtworkProvider {
             }
             let _ = fs::remove_file(&path);
         }
-        let parsed = Url::parse(url)?;
         let bytes = match parsed.scheme() {
             "file" => {
                 let p = parsed
@@ -54,7 +66,7 @@ impl ArtworkProvider {
                 read_bounded_file(&p)?
             }
             "http" | "https" => {
-                let response = self.client.get(parsed).send()?.error_for_status()?;
+                let response = self.client.get(parsed.clone()).send()?.error_for_status()?;
                 if response.content_length().is_some_and(|s| s > MAX_BYTES) {
                     bail!("Artwork too large");
                 }
@@ -74,6 +86,39 @@ impl ArtworkProvider {
         Ok(art)
     }
 }
+fn higher_quality_url(url: &Url) -> Option<Url> {
+    let host = url.host_str()?;
+    let path = url.path();
+    let mut better = url.clone();
+    if host == "googleusercontent.com"
+        || host.ends_with(".googleusercontent.com")
+        || host == "ggpht.com"
+        || host.ends_with(".ggpht.com")
+    {
+        let (base, options) = path.rsplit_once('=')?;
+        if !options.starts_with(['w', 'h', 's']) {
+            return None;
+        }
+        better.set_path(&format!("{base}=w1200-h1200-l90-rj"));
+    } else if host == "i.scdn.co" {
+        let suffix = path
+            .strip_prefix("/image/ab67616d00004851")
+            .or_else(|| path.strip_prefix("/image/ab67616d00001e02"))?;
+        better.set_path(&format!("/image/ab67616d0000b273{suffix}"));
+    } else if (host == "ytimg.com" || host.ends_with(".ytimg.com")) && path.starts_with("/vi/") {
+        let (base, name) = path.rsplit_once('/')?;
+        if !matches!(
+            name,
+            "default.jpg" | "mqdefault.jpg" | "hqdefault.jpg" | "sddefault.jpg"
+        ) {
+            return None;
+        }
+        better.set_path(&format!("{base}/maxresdefault.jpg"));
+    } else {
+        return None;
+    }
+    (better != *url).then_some(better)
+}
 fn read_bounded_file(path: &Path) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     fs::File::open(path)?
@@ -91,11 +136,13 @@ fn decode(bytes: &[u8]) -> Result<Artwork> {
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
-    let image = reader
-        .decode()
-        .context("Unsupported artwork image")?
-        .thumbnail(512, 512)
-        .to_rgb8();
+    let image = reader.decode().context("Unsupported artwork image")?;
+    let image = if image.width() > 1536 || image.height() > 1536 {
+        image.resize(1536, 1536, image::imageops::FilterType::Lanczos3)
+    } else {
+        image
+    }
+    .to_rgb8();
     let palette = dominant_palette(&image);
     Ok(Artwork { image, palette })
 }

@@ -931,7 +931,7 @@ impl App {
         if let Some(protocol) = &mut self.cover_protocol {
             f.render_stateful_widget(
                 StatefulImage::default()
-                    .resize(Resize::Scale(Some(image::imageops::FilterType::Triangle))),
+                    .resize(Resize::Scale(Some(image::imageops::FilterType::Lanczos3))),
                 area,
                 protocol,
             );
@@ -1112,7 +1112,7 @@ fn draw_cover(f: &mut Frame, a: Rect, art: &Artwork) {
         &crop,
         a.width as u32,
         a.height as u32 * 2,
-        image::imageops::FilterType::Triangle,
+        image::imageops::FilterType::Lanczos3,
     );
     for y in 0..a.height {
         let line = Line::from(

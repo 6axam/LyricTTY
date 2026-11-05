@@ -444,12 +444,21 @@ impl PlayerState {
                 "thumbnail",
             ],
         )
-        .or_else(|| tag(ytdl, &["thumbnail"]))
         .or_else(|| {
             ytdl.get("thumbnails")
                 .and_then(Value::as_array)
-                .and_then(|items| items.iter().rev().find_map(|item| tag(item, &["url"])))
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .filter(|item| tag(item, &["url"]).is_some())
+                        .max_by_key(|item| {
+                            item.get("width").and_then(Value::as_u64).unwrap_or(0)
+                                * item.get("height").and_then(Value::as_u64).unwrap_or(0)
+                        })
+                })
+                .and_then(|item| tag(item, &["url"]))
         })
+        .or_else(|| tag(ytdl, &["thumbnail"]))
         .or_else(|| {
             self.properties
                 .get("track-list")
