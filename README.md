@@ -23,7 +23,7 @@ Spotify-like synced lyrics and adaptive music UI for your terminal.
 - Pixel-smooth lyrics in Kitty: cached text images move at sub-cell offsets with larger typography and no doubled rows. Other terminals keep eased row blending. Both paths retain line/word seek.
 - Mouse seeking, manual lyric browsing, return to LIVE, and a minimal karaoke layout.
 - Cached artwork, dominant-color dark themes with contrast checks, smooth theme transitions, and Kitty Graphics (truecolor halfblocks elsewhere).
-- Instrumental state transitions with a lightweight ambient animation.
+- Instrumental passages show a CAVA spectrum from the default playback-output monitor; the process runs only during those passages.
 - Compact / Standard / Wide layouts, in-app settings, and idle frame scheduling.
 
 ## Install
@@ -125,7 +125,7 @@ See [all settings](docs/configuration.md), [architecture](docs/architecture.md),
 - yt-dlp/YouTube availability and extraction speed vary. Update yt-dlp through your package manager when extraction fails.
 - Lyrics availability and community timing quality vary. Displayed video titles are conservatively normalized for catalog lookup; Live/Remix qualifiers are preserved.
 - Outside Kitty's pixel renderer, terminal glyphs occupy whole cells. The ANSI fallback blends adjacent rows and may have a soft doubled edge. In Kitty, set FPS to 60 and enable Pixel lyrics in `,` for the smoothest available mode.
-- Instrumental detection uses explicit cue gaps or a conservative estimate after line starts. The ambient bars are **not** audio FFT; playback capture is used for word recognition only.
+- Instrumental detection uses timed lyric gaps. Install `cava` for the real audio spectrum (PulseAudio/PipeWire output monitor); absent CAVA shows an unavailable label. No microphone is used.
 - Karaoke minimizes the interface; Kitty pixel lyrics also use larger type. The terminal fallback uses the terminal's font size.
 - A session D-Bus restart requires restarting LyricTTY. Individual player disappearance/replacement is handled live.
 - Session/queue persistence, a queue editor, catalog search and account/library features remain outside this development milestone.

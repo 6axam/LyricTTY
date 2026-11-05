@@ -1,6 +1,7 @@
 pub mod alignment;
 pub mod artwork;
 pub mod assets;
+pub mod cava;
 pub mod config;
 pub mod content;
 pub mod instrumental;

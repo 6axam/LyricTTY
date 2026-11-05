@@ -63,6 +63,7 @@ pub struct App {
     panel_key: String,
     graphical_panel: bool,
     instrumental: InstrumentalState,
+    cava: lyrictty::cava::Cava,
     manual_line: Option<usize>,
     plain_scroll: u16,
     manual_until: Instant,
@@ -80,7 +81,6 @@ pub struct App {
     native_before_open: Option<String>,
     karaoke: bool,
     last: Instant,
-    started: Instant,
     lyric_rect: Rect,
     progress_rect: Rect,
     controls_rect: Rect,
@@ -117,6 +117,7 @@ impl App {
             panel_key: String::new(),
             graphical_panel: false,
             instrumental: InstrumentalState::default(),
+            cava: lyrictty::cava::Cava::default(),
             manual_line: None,
             plain_scroll: 0,
             manual_until: Instant::now(),
@@ -134,7 +135,6 @@ impl App {
             native_before_open: None,
             karaoke: false,
             last: Instant::now(),
-            started: Instant::now(),
             lyric_rect: Rect::default(),
             progress_rect: Rect::default(),
             controls_rect: Rect::default(),
@@ -177,6 +177,7 @@ impl App {
         self.dirty = true;
     }
     pub fn cleanup_graphics(&mut self, output: &mut impl std::io::Write) -> std::io::Result<()> {
+        self.cava.stop();
         if self.resume_after_preparation {
             if let (Some(source), Some(service)) = (self.source(), &self.service) {
                 if source.source_id != "native" && source.status == PlaybackStatus::Paused {
@@ -577,6 +578,14 @@ impl App {
             self.config.instrumental_threshold_secs,
             self.config.instrumental_fade_secs,
             self.content.instrumental,
+        );
+        self.cava.update(
+            !self.demo
+                && self.instrumental.intensity > 0.01
+                && self
+                    .source()
+                    .is_some_and(|s| s.status == PlaybackStatus::Playing),
+            dt,
         );
         self.dirty |= self.scroll.animating()
             || self.theme.animating()
@@ -984,7 +993,7 @@ impl App {
             let position = self.lyric_position();
             if self.config.pixel_lyrics
                 && self.overlay == Overlay::None
-                && self.instrumental.intensity < 0.995
+                && self.instrumental.intensity <= 0.01
             {
                 if let Some(renderer) = &mut self.pixel_lyrics {
                     if renderer.supports(&self.content.lines) {
@@ -1274,24 +1283,45 @@ impl App {
             return;
         }
         let p = self.theme.palette();
-        let t = self.started.elapsed().as_secs_f32();
-        let glyphs = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-        let bars: String = (0..17)
-            .map(|i| {
-                let v = ((t * 1.7 + i as f32 * 0.6).sin() * 0.5 + 0.5) * 6.0;
-                glyphs[v as usize]
-            })
-            .collect();
-        let rect = Rect::new(a.x, a.y + a.height / 2 - 1, a.width, 3);
+        f.render_widget(Block::default().style(Style::default().bg(p.bg)), a);
+        let count = usize::from((a.width.saturating_sub(4) / 2).min(lyrictty::cava::BARS as u16));
+        let height = a.height.saturating_sub(4).min(12);
+        let x = a.x + a.width.saturating_sub(count as u16 * 2) / 2;
+        let y = a.y + a.height.saturating_sub(height) / 2;
+        let glyphs = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        for row in 0..height {
+            let spans = (0..count)
+                .flat_map(|i| {
+                    let index = i * lyrictty::cava::BARS / count;
+                    let amplitude = self.cava.levels()[index] * height as f32;
+                    let amount = (amplitude - (height - row - 1) as f32).clamp(0.0, 1.0);
+                    let glyph = glyphs[(amount * 8.0).ceil() as usize];
+                    let color = theme::mix(
+                        p.bg,
+                        theme::mix(p.accent, p.fg, 1.0 - row as f32 / height as f32),
+                        self.instrumental.intensity,
+                    );
+                    [
+                        Span::styled(glyph.to_string(), Style::default().fg(color)),
+                        Span::raw(" "),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            f.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect::new(x, y + row, count as u16 * 2, 1),
+            );
+        }
+        let label = if self.cava.failed() {
+            "CAVA недоступна"
+        } else {
+            "ПРОИГРЫШ"
+        };
         f.render_widget(
-            Paragraph::new(format!("{bars}\n\nINSTRUMENTAL · ambient"))
+            Paragraph::new(label)
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(theme::mix(
-                    p.bg,
-                    p.accent,
-                    self.instrumental.intensity,
-                ))),
-            rect,
+                .style(Style::default().fg(theme::mix(p.bg, p.muted, self.instrumental.intensity))),
+            Rect::new(a.x, (y + height + 1).min(a.bottom() - 1), a.width, 1),
         );
     }
     fn draw_overlay(&mut self, f: &mut Frame) {
