@@ -316,7 +316,7 @@ impl PixelLyrics {
                 * edge
                 * (3.0 - 2.0 * edge);
             let opacity = (emphasis * 32.0).round() as u8;
-            let style = line_style(lyric, position, palette, opacity, &line.words);
+            let style = line_style(lyric, position, palette, opacity, line);
             if !line.uploaded || line.style != style {
                 let png = paint_line(line, lyric, width, position, palette, opacity)?;
                 transmit(&mut self.pending, id, &png)?;
@@ -392,14 +392,26 @@ fn line_style(
     position: f32,
     palette: Palette,
     opacity: u8,
-    words: &[WordBox],
+    raster: &RasterLine,
 ) -> Vec<u8> {
     let mut style = vec![opacity, u8::from(position >= line.end)];
     for c in [palette.fg, palette.muted, palette.accent] {
         style.extend(rgb(c));
     }
+    if line.words.is_empty() {
+        let width = raster
+            .glyphs
+            .iter()
+            .map(|g| g.glyph.metrics.advance_width)
+            .sum::<f32>();
+        style.extend_from_slice(
+            &((progress(line.start, line.end, position) * width * 4.0).floor() as u32)
+                .to_le_bytes(),
+        );
+    }
     for (i, w) in line.words.iter().enumerate() {
-        let width = words
+        let width = raster
+            .words
             .iter()
             .filter(|r| r.index == i)
             .map(|r| r.width)
@@ -425,15 +437,33 @@ fn paint_line(
     palette: Palette,
     opacity: u8,
 ) -> Result<Vec<u8>> {
+    let fill_color = crate::theme::lyric_fill(palette);
     let mut pixels = vec![0u8; width as usize * line.height as usize * 4];
+    // Line-only sources have no word cues: approximate the sweep visually,
+    // without manufacturing or caching word timestamps.
+    let line_fill = progress(lyric.start, lyric.end, position)
+        * line
+            .glyphs
+            .iter()
+            .map(|g| g.glyph.metrics.advance_width)
+            .sum::<f32>();
+    let mut line_consumed = 0.0;
     for glyph in &line.glyphs {
         let g = &glyph.glyph;
         let mut color = rgb(palette.fg);
         let mut boundary = None;
+        if lyric.words.is_empty() && position >= lyric.start && position < lyric.end {
+            color = rgb(palette.muted);
+            boundary = Some(
+                glyph.x as f32 - g.metrics.xmin as f32
+                    + (line_fill - line_consumed).clamp(0.0, g.metrics.advance_width),
+            );
+        }
+        line_consumed += g.metrics.advance_width;
         if let Some(wi) = glyph.word {
             let w = &lyric.words[wi];
             if position >= w.end && position < lyric.end {
-                color = rgb(palette.accent);
+                color = rgb(fill_color);
             } else if position < w.end {
                 color = rgb(palette.muted);
                 if position >= w.start {
@@ -470,7 +500,7 @@ fn paint_line(
                 let color = if let Some(edge) = boundary {
                     rgb(crate::theme::mix(
                         palette.muted,
-                        palette.accent,
+                        fill_color,
                         (edge - x as f32).clamp(0.0, 1.0),
                     ))
                 } else {

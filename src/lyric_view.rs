@@ -171,6 +171,7 @@ struct Glyph {
     timestamp: Option<f32>,
 }
 fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) -> Vec<Vec<Glyph>> {
+    let fill_color = crate::theme::lyric_fill(palette);
     let mut rows = vec![Vec::new()];
     let mut used = 0;
     let active = active_word(line, position);
@@ -193,7 +194,32 @@ fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) ->
         }
     };
     if line.words.is_empty() {
-        push(&line.text, palette.fg, None);
+        let total = line
+            .text
+            .graphemes(true)
+            .map(|g| g.width())
+            .sum::<usize>()
+            .max(1);
+        let progress = if line.end > line.start {
+            ((position - line.start) / (line.end - line.start)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let mut consumed = 0;
+        for g in line.text.graphemes(true) {
+            let size = g.width().max(1);
+            let color = if position >= line.start && position < line.end {
+                mix(
+                    palette.muted,
+                    fill_color,
+                    ((progress * total as f32 - consumed as f32) / size as f32).clamp(0.0, 1.0),
+                )
+            } else {
+                palette.fg
+            };
+            push(g, color, None);
+            consumed += g.width();
+        }
     } else {
         for (wi, word) in line.words.iter().enumerate() {
             let count = word
@@ -212,14 +238,14 @@ fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) ->
                 let size = g.width().max(1);
                 let color = if position >= word.end {
                     if position < line.end {
-                        palette.accent
+                        fill_color
                     } else {
                         palette.fg
                     }
                 } else if Some(wi) == active {
                     mix(
                         palette.muted,
-                        palette.accent,
+                        fill_color,
                         ((progress * count as f32 - filled_width as f32) / size as f32)
                             .clamp(0.0, 1.0),
                     )

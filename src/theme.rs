@@ -49,6 +49,19 @@ pub fn from_artwork((r, g, b): (u8, u8, u8)) -> Palette {
         muted: Color::Rgb(151, 166, 157),
     }
 }
+/// Keep the artwork hue while making the moving lyric fill distinct from gray.
+pub fn lyric_fill(palette: Palette) -> Color {
+    if let Color::Rgb(r, g, b) = palette.accent {
+        let low = r.min(g).min(b);
+        let range = r.max(g).max(b) - low;
+        if range >= 8 {
+            let channel =
+                |v: u8| (145.0 + f32::from(v - low) / f32::from(range) * 90.0).round() as u8;
+            return Color::Rgb(channel(r), channel(g), channel(b));
+        }
+    }
+    palette.fg
+}
 pub fn mix(a: Color, b: Color, t: f32) -> Color {
     match (a, b) {
         (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
