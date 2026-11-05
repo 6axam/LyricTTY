@@ -1,7 +1,5 @@
 mod app;
-mod lyric_view;
-mod lyrics;
-mod theme;
+use lyrictty::{lyric_view, lyrics, theme};
 
 use anyhow::Result;
 use app::App;
