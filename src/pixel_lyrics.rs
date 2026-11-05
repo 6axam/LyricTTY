@@ -155,13 +155,12 @@ impl PixelLyrics {
             self.glyphs.clear();
         }
         let row_height = (px * 1.45).ceil();
-        let gutter = (px * 0.18).ceil();
         let mut offset = 0.0;
         for line in content {
             let mut glyphs = Vec::new();
             let mut words = Vec::new();
             let mut row_widths = Vec::new();
-            let mut x = gutter;
+            let mut x = 0.0f32;
             let mut y = 0.0f32;
             let parts: Vec<_> = if line.words.is_empty() {
                 vec![(line.text.as_str(), None)]
@@ -177,13 +176,13 @@ impl PixelLyrics {
                     .chars()
                     .map(|c| self.glyph(c).metrics.advance_width)
                     .sum();
-                if x > gutter
+                if x > 0.0
                     && word_width > 0.0
-                    && word_width <= width as f32 - 2.0 * gutter
-                    && x + word_width > width as f32 - gutter
+                    && word_width <= width as f32
+                    && x + word_width > width as f32
                 {
                     row_widths.push(x);
-                    x = gutter;
+                    x = 0.0;
                     y += row_height;
                 }
                 let mut part_x = x;
@@ -193,7 +192,7 @@ impl PixelLyrics {
                     }
                     let glyph = self.glyph(c);
                     let advance = glyph.metrics.advance_width;
-                    if c == '\n' || (x + advance > width as f32 - gutter && x > gutter) {
+                    if c == '\n' || (x + advance > width as f32 && x > 0.0) {
                         if let Some(index) = word {
                             if x > part_x {
                                 words.push(WordBox {
@@ -206,8 +205,8 @@ impl PixelLyrics {
                             }
                         }
                         row_widths.push(x);
-                        x = gutter;
-                        part_x = gutter;
+                        x = 0.0;
+                        part_x = 0.0;
                         y += row_height;
                         if c == '\n' {
                             continue;
@@ -395,10 +394,7 @@ fn line_style(
     opacity: u8,
     words: &[WordBox],
 ) -> Vec<u8> {
-    let mut style = vec![
-        opacity,
-        (crate::lyrics::highlight_strength(line.start, line.end, position) * 32.0).round() as u8,
-    ];
+    let mut style = vec![opacity];
     for c in [palette.fg, palette.muted, palette.accent] {
         style.extend(rgb(c));
     }
@@ -411,9 +407,6 @@ fn line_style(
         let progress = progress(w.start, w.end, position);
         style.extend_from_slice(&((progress * width).floor() as u32).to_le_bytes());
         style.push(u8::from(position >= w.end));
-        style.push(
-            (crate::lyrics::highlight_strength(w.start, w.end, position) * 32.0).round() as u8,
-        );
     }
     style
 }
@@ -433,73 +426,26 @@ fn paint_line(
     opacity: u8,
 ) -> Result<Vec<u8>> {
     let mut pixels = vec![0u8; width as usize * line.height as usize * 4];
-    let row_height = line.height as f32 - line.glyphs.last().map(|g| g.row_y).unwrap_or(0.0);
-    let tint = rgb(palette.accent);
-    let alpha = f32::from(opacity) / 32.0;
-    if lyric.words.is_empty() {
-        let strength = crate::lyrics::highlight_strength(lyric.start, lyric.end, position);
-        if strength > 0.0 {
-            let mut rows = std::collections::BTreeMap::<i32, (f32, f32)>::new();
-            for glyph in &line.glyphs {
-                if glyph.glyph.metrics.width == 0 {
-                    continue;
-                }
-                let bounds = rows
-                    .entry(glyph.row_y as i32)
-                    .or_insert((glyph.x as f32, glyph.x as f32));
-                bounds.0 = bounds.0.min(glyph.x as f32);
-                bounds.1 = bounds
-                    .1
-                    .max(glyph.x as f32 + glyph.glyph.metrics.width as f32);
-            }
-            for (y, (left, right)) in rows {
-                paint_highlight(
-                    &mut pixels,
-                    width,
-                    line.height,
-                    left - 6.0,
-                    y as f32 + row_height * 0.07,
-                    right - left + 12.0,
-                    row_height * 0.78,
-                    tint,
-                    strength * alpha,
-                    None,
-                );
-            }
-        }
-    } else {
-        for (i, word) in lyric.words.iter().enumerate() {
-            let strength = crate::lyrics::highlight_strength(word.start, word.end, position);
-            if strength <= 0.0 {
-                continue;
-            }
-            let regions: Vec<_> = line.words.iter().filter(|r| r.index == i).collect();
-            let mut fill = progress(word.start, word.end, position)
-                * regions.iter().map(|r| r.width).sum::<f32>();
-            for region in regions {
-                paint_highlight(
-                    &mut pixels,
-                    width,
-                    line.height,
-                    region.x,
-                    region.y + row_height * 0.07,
-                    region.width,
-                    row_height * 0.78,
-                    tint,
-                    strength * alpha,
-                    Some(fill.min(region.width)),
-                );
-                fill = (fill - region.width).max(0.0);
-            }
-        }
-    }
     for glyph in &line.glyphs {
         let g = &glyph.glyph;
         let mut color = rgb(palette.fg);
+        let mut boundary = None;
         if let Some(wi) = glyph.word {
             let w = &lyric.words[wi];
-            if position < w.start {
+            if position < w.end {
                 color = rgb(palette.muted);
+                if position >= w.start {
+                    let regions: Vec<_> = line.words.iter().filter(|r| r.index == wi).collect();
+                    let mut fill = progress(w.start, w.end, position)
+                        * regions.iter().map(|r| r.width).sum::<f32>();
+                    for region in regions {
+                        if glyph.row_y >= region.y && glyph.row_y < region.y + region.height {
+                            boundary = Some(region.x + fill.min(region.width));
+                            break;
+                        }
+                        fill = (fill - region.width).max(0.0);
+                    }
+                }
             }
         }
         for gy in 0..g.metrics.height {
@@ -516,12 +462,18 @@ fn paint_line(
                 if alpha == 0 {
                     continue;
                 }
+                let color = if let Some(edge) = boundary.filter(|edge| (x as f32) < *edge) {
+                    rgb(crate::theme::mix(
+                        palette.accent,
+                        palette.fg,
+                        ((edge - x as f32) / 4.0).clamp(0.0, 1.0),
+                    ))
+                } else {
+                    color
+                };
                 let index = (y as usize * width as usize + x as usize) * 4;
-                composite(
-                    &mut pixels[index..index + 4],
-                    color,
-                    f32::from(alpha) / 255.0 * f32::from(opacity) / 32.0,
-                );
+                pixels[index..index + 3].copy_from_slice(&color);
+                pixels[index + 3] = ((u16::from(alpha) * u16::from(opacity)) / 32) as u8;
             }
         }
     }
@@ -533,49 +485,6 @@ fn paint_line(
         image::ExtendedColorType::Rgba8,
     )?;
     Ok(png)
-}
-fn composite(pixel: &mut [u8], color: [u8; 3], alpha: f32) {
-    let old_alpha = f32::from(pixel[3]) / 255.0;
-    let out_alpha = alpha + old_alpha * (1.0 - alpha);
-    if out_alpha <= 0.0 {
-        return;
-    }
-    for i in 0..3 {
-        pixel[i] = ((f32::from(color[i]) * alpha + f32::from(pixel[i]) * old_alpha * (1.0 - alpha))
-            / out_alpha)
-            .round() as u8;
-    }
-    pixel[3] = (out_alpha * 255.0).round() as u8;
-}
-#[allow(clippy::too_many_arguments)]
-fn paint_highlight(
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    left: f32,
-    top: f32,
-    w: f32,
-    h: f32,
-    color: [u8; 3],
-    strength: f32,
-    fill: Option<f32>,
-) {
-    if w <= 0.0 || h <= 0.0 {
-        return;
-    }
-    let radius = (h * 0.24).min(w * 0.5);
-    for y in (top.floor() as i32).max(0)..((top + h).ceil() as i32).min(height as i32) {
-        for x in (left.floor() as i32).max(0)..((left + w).ceil() as i32).min(width as i32) {
-            let dx = ((x as f32 + 0.5 - left - w / 2.0).abs() - (w / 2.0 - radius)).max(0.0);
-            let dy = ((y as f32 + 0.5 - top - h / 2.0).abs() - (h / 2.0 - radius)).max(0.0);
-            let edge = (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
-            let tint = fill
-                .map(|f| 0.18 + 0.27 * ((left + f - x as f32) / 3.0).clamp(0.0, 1.0))
-                .unwrap_or(0.24);
-            let index = (y as usize * width as usize + x as usize) * 4;
-            composite(&mut pixels[index..index + 4], color, strength * edge * tint);
-        }
-    }
 }
 fn transmit(output: &mut Vec<u8>, id: u32, png: &[u8]) -> io::Result<()> {
     let encoded = STANDARD.encode(png);
