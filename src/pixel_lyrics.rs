@@ -46,6 +46,7 @@ struct RasterLine {
     style: Vec<u8>,
     uploaded: bool,
     visible: bool,
+    slot: u32,
 }
 pub struct PixelLyrics {
     font: Font,
@@ -84,7 +85,7 @@ impl PixelLyrics {
             lines: Vec::new(),
             width: 0,
             karaoke: false,
-            id_base: 0x6000_0000 | (std::process::id() & 0x000f_ffff) << 10,
+            id_base: 0x6000_0000 | (std::process::id() & 0x0000_7fff) << 14,
             pending: Vec::new(),
         })
     }
@@ -113,20 +114,30 @@ impl PixelLyrics {
     pub fn begin_frame(&mut self) {
         self.pending.clear();
     }
-    fn id(&self, index: usize) -> u32 {
-        self.id_base.wrapping_add(index as u32 + 1)
+    fn id(&self, index: usize, slot: u32) -> u32 {
+        self.id_base.wrapping_add(index as u32 * 2 + slot + 1)
     }
     fn clear_images(&mut self) {
         for (i, line) in self.lines.iter().enumerate() {
             if line.uploaded {
-                let _ = write!(self.pending, "\x1b_Ga=d,d=I,i={},q=2\x1b\\", self.id(i));
+                for slot in 0..2 {
+                    let _ = write!(
+                        self.pending,
+                        "\x1b_Ga=d,d=I,i={},q=2\x1b\\",
+                        self.id(i, slot)
+                    );
+                }
             }
         }
     }
     pub fn hide(&mut self) {
         for i in 0..self.lines.len() {
             if self.lines[i].visible {
-                let _ = write!(self.pending, "\x1b_Ga=d,d=i,i={},q=2\x1b\\", self.id(i));
+                let _ = write!(
+                    self.pending,
+                    "\x1b_Ga=d,d=i,i={},q=2\x1b\\",
+                    self.id(i, self.lines[i].slot)
+                );
                 self.lines[i].visible = false;
             }
         }
@@ -276,6 +287,7 @@ impl PixelLyrics {
             let old = previous.next().filter(|_| stable_geometry);
             let uploaded = old.as_ref().is_some_and(|old| old.uploaded);
             let visible = old.as_ref().is_some_and(|old| old.visible);
+            let slot = old.as_ref().map_or(0, |old| old.slot);
             let style = if same_parts.get(index) == Some(&true) {
                 old.map(|old| old.style).unwrap_or_default()
             } else {
@@ -289,6 +301,7 @@ impl PixelLyrics {
                 style,
                 uploaded,
                 visible,
+                slot,
             });
             offset += height as f32 + row_height * 0.75;
         }
@@ -328,13 +341,14 @@ impl PixelLyrics {
         let center = pane_height as f32 * 0.14 - self.font_px * 0.6;
         let mut hits = Vec::new();
         for (i, lyric) in content.iter().enumerate() {
-            let id = self.id(i);
+            let base = self.id(i, 0);
             let line = &mut self.lines[i];
+            let old_id = base + line.slot;
             let top = (center + line.offset - offset).round() as i32;
             let clip = clip_line(top, line.height, pane_height);
             let Some((crop_y, height, destination)) = clip else {
                 if line.visible {
-                    write!(self.pending, "\x1b_Ga=d,d=i,i={id},q=2\x1b\\")?;
+                    write!(self.pending, "\x1b_Ga=d,d=i,i={old_id},q=2\x1b\\")?;
                     line.visible = false;
                 }
                 continue;
@@ -350,13 +364,20 @@ impl PixelLyrics {
             let style = line_style(lyric, position, palette, opacity, line);
             if !line.uploaded || line.style != style {
                 let png = paint_line(line, lyric, width, position, palette, opacity)?;
-                transmit(&mut self.pending, id, &png)?;
+                let slot = line.slot ^ 1;
+                // Upload into the spare slot without removing the visible line.
+                transmit(&mut self.pending, base + slot, &png)?;
+                line.slot = slot;
                 line.style = style;
                 line.uploaded = true;
             }
+            let id = base + line.slot;
             let y = pane_y + destination;
             let x = u32::from(area.x + 1) * u32::from(self.cell.0);
             write!(self.pending,"\x1b[{};{}H\x1b_Ga=p,i={id},p=1,x=0,y={crop_y},w={width},h={height},X={},Y={},C=1,z=2,q=2\x1b\\",y/u32::from(self.cell.1)+1,x/u32::from(self.cell.0)+1,x%u32::from(self.cell.0),y%u32::from(self.cell.1))?;
+            if line.visible && id != old_id {
+                write!(self.pending, "\x1b_Ga=d,d=i,i={old_id},q=2\x1b\\")?;
+            }
             line.visible = true;
             for word in &line.words {
                 if !lyric.words[word.index].is_timed() {

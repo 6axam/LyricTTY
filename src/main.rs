@@ -16,8 +16,11 @@ use lyrictty::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{
-    env, io,
+    cell::RefCell,
+    env,
+    io::{self, Write},
     path::PathBuf,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -63,6 +66,16 @@ fn options(args: Vec<String>) -> Result<Options> {
     Ok(options)
 }
 struct ScreenGuard;
+struct FrameOutput(Rc<RefCell<Vec<u8>>>);
+impl Write for FrameOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 impl Drop for ScreenGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
@@ -132,13 +145,20 @@ fn main() -> Result<()> {
     )?;
     app.picker = ratatui_image::picker::Picker::from_query_stdio().ok();
     app.setup_pixel_lyrics();
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    let result = run(&mut terminal, &mut app);
+    // Rasterization and image encoding must finish before opening a terminal
+    // synchronized update. Buffer backend flushes too, including image widgets.
+    let bytes = Rc::new(RefCell::new(Vec::new()));
+    let mut terminal = Terminal::new(CrosstermBackend::new(FrameOutput(bytes.clone())))?;
+    let result = run(&mut terminal, &mut app, &bytes);
     app.cleanup_graphics(&mut io::stdout())?;
     result
 }
 
-fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
+fn run(
+    terminal: &mut Terminal<CrosstermBackend<FrameOutput>>,
+    app: &mut App,
+    bytes: &RefCell<Vec<u8>>,
+) -> Result<()> {
     let mut pacer = FramePacer::new(Instant::now(), u32::from(app.config.fps));
     let mut idle = true;
     let synchronized = app
@@ -155,17 +175,24 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) 
         idle = !active;
         if app.dirty && pacer.wait(now).is_zero() {
             if synchronized {
-                execute!(io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
+                execute!(
+                    terminal.backend_mut(),
+                    crossterm::terminal::BeginSynchronizedUpdate
+                )?;
             }
-            let draw = (|| -> Result<()> {
-                terminal.draw(|f| app.draw(f))?;
-                app.flush_graphics(&mut io::stdout())?;
-                Ok(())
-            })();
+            terminal.draw(|f| app.draw(f))?;
+            app.flush_graphics(terminal.backend_mut())?;
             if synchronized {
-                execute!(io::stdout(), crossterm::terminal::EndSynchronizedUpdate)?;
+                execute!(
+                    terminal.backend_mut(),
+                    crossterm::terminal::EndSynchronizedUpdate
+                )?;
             }
-            draw?;
+            let mut output = io::stdout().lock();
+            let mut bytes = bytes.borrow_mut();
+            output.write_all(&bytes)?;
+            output.flush()?;
+            bytes.clear();
             pacer.presented(Instant::now(), u32::from(app.config.fps));
         }
         let wait = if app.animating() || app.dirty {

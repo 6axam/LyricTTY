@@ -61,6 +61,7 @@ pub struct App {
     panel_renderer: Option<lyrictty::player_panel::PanelRenderer>,
     panel_protocol: Option<StatefulProtocol>,
     panel_key: String,
+    panel_slot: u32,
     graphical_panel: bool,
     instrumental: InstrumentalState,
     cava: lyrictty::cava::Cava,
@@ -116,6 +117,7 @@ impl App {
             panel_renderer: None,
             panel_protocol: None,
             panel_key: String::new(),
+            panel_slot: 0,
             graphical_panel: false,
             instrumental: InstrumentalState::default(),
             cava: lyrictty::cava::Cava::default(),
@@ -189,8 +191,10 @@ impl App {
             self.resume_after_preparation = false;
         }
         if self.panel_protocol.is_some() {
-            let id = 0x5000_0000 | (std::process::id() & 0x00ff_ffff);
-            output.write_all(format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").as_bytes())?;
+            for slot in 0..2 {
+                let id = 0x5000_0000 | (std::process::id() & 0x007f_ffff) << 1 | slot;
+                output.write_all(format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").as_bytes())?;
+            }
         }
         if let Some(renderer) = &mut self.pixel_lyrics {
             renderer.cleanup(output)?;
@@ -1167,6 +1171,8 @@ impl App {
         let palette = self.theme.palette();
         let key = format!("{width}:{height}:{title}:{artist}:{position}:{duration}:{playing}:{volume}:{palette:?}");
         if self.panel_key != key {
+            // Kitty deletes every placement when an image ID is retransmitted.
+            // Keep the displayed card alive while the other slot is uploaded.
             let image = self.panel_renderer.as_ref().unwrap().render(
                 width,
                 height,
@@ -1185,9 +1191,10 @@ impl App {
                 cell,
                 image::Rgba([0, 0, 0, 0]),
             );
+            self.panel_slot ^= 1;
             let protocol = ratatui_image::protocol::StatefulProtocolType::Kitty(
                 ratatui_image::protocol::kitty::StatefulKitty::new(
-                    0x5000_0000 | (std::process::id() & 0x00ff_ffff),
+                    0x5000_0000 | (std::process::id() & 0x007f_ffff) << 1 | self.panel_slot,
                     false,
                 ),
             );

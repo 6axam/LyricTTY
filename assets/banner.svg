@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="440" viewBox="0 0 1440 440" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">LyricTTY</title>
+  <desc id="description">An original olive waveform emblem beside the LyricTTY wordmark on a dark olive field. Music, in its own light.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1440" y2="440" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#242b1e"/><stop offset="1" stop-color="#10150f"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="140" y1="130" x2="330" y2="310" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#e1e9b0"/><stop offset="1" stop-color="#899b5b"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0" cy="0" r="1" gradientTransform="translate(1140 220) scale(450 360)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#73834c" stop-opacity=".16"/><stop offset="1" stop-color="#73834c" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" stroke="#c6d29a" stroke-opacity=".035"/>
+    </pattern>
+  </defs>
+  <rect width="1440" height="440" rx="24" fill="url(#background)"/>
+  <rect width="1440" height="440" rx="24" fill="url(#halo)"/>
+  <rect x="1" y="1" width="1438" height="438" rx="23" stroke="#b6c78b" stroke-opacity=".15"/>
+  <path d="M960 40H1400V400H960Z" fill="url(#grid)"/>
+  <g stroke="#b8c88c" stroke-linecap="round">
+    <path d="M1000 220h14m12-13v26m14-47v68m14-89v110m14-66v22m14-81v140m14-105v70m14-48v26m14-75v124m14-96v68m14-112v156m14-101v46m14-65v84m14-53v22m14-41v60m14-37v14m14-27v40m14-23h14" stroke-opacity=".15" stroke-width="4"/>
+  </g>
+  <g transform="translate(100 102)">
+    <rect width="236" height="236" rx="66" fill="#b4c586" fill-opacity=".045" stroke="#c9d7a2" stroke-opacity=".22"/>
+    <path d="M58 88v62h37m18-86v112m25-86v60m25-81v98m25-57v16" stroke="url(#accent)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="188" cy="77" r="6" fill="#dce6ac"/>
+  </g>
+  <text x="390" y="138" fill="#a7b77e" font-family="ui-monospace, 'DejaVu Sans Mono', monospace" font-size="14" letter-spacing="4">YOUR TERMINAL. YOUR MUSIC.</text>
+  <text x="384" y="239" fill="#edf0df" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="88" font-weight="700" letter-spacing="-5">Lyric<tspan fill="#bfce91">TTY</tspan></text>
+  <text x="390" y="290" fill="#b7bfaa" font-family="Inter, 'DejaVu Sans', sans-serif" font-size="23" letter-spacing=".5">Music, in its own light.</text>
+  <path d="M390 329h48" stroke="#bfce91" stroke-width="3" stroke-linecap="round"/>
+  <text x="455" y="334" fill="#859077" font-family="ui-monospace, 'DejaVu Sans Mono', monospace" font-size="13" letter-spacing="2">LYRICS / COLOR / MOTION</text>
+</svg>
