@@ -1,4 +1,5 @@
 use crate::{
+    lyric_view::{self, Hit, ScrollState},
     lyrics::{self, LyricLine},
     theme::Palette,
 };
@@ -22,13 +23,14 @@ pub struct App {
     debug: bool,
     lines: Vec<LyricLine>,
     palette: Palette,
-    scroll: f32,
+    scroll: ScrollState,
+    hits: Vec<Hit>,
     last: Instant,
     status: String,
 }
 impl App {
     pub fn new(debug: bool) -> Self {
-        Self { should_quit:false, playing:false, position:0.0, duration:238.0, volume:70, debug, lines: lyrics::parse_lrc("[00:00.00]Welcome to LyricTTY\n[00:04.00]Play music from your terminal\n[00:09.00]Connect a browser through MPRIS\n[00:15.00]Every line can seek the song\n[00:22.00]Instrumental · · ·\n[00:30.00]Your lyrics stay alive"), palette: Palette::default(), scroll:0.0, last:Instant::now(), status:"Demo mode · press ? for help".into() }
+        Self { should_quit:false, playing:false, position:0.0, duration:238.0, volume:70, debug, lines: lyrics::parse_lrc("[00:00.00]Welcome to LyricTTY\n[00:04.00]Play music from your terminal\n[00:09.00]Connect a browser through MPRIS\n[00:15.00]Every line can seek the song\n[00:22.00]Instrumental · · ·\n[00:30.00]Your lyrics stay alive"), palette: crate::theme::from_artwork((32,65,43)), scroll:ScrollState::default(), hits: Vec::new(), last:Instant::now(), status:"Demo mode · press ? for help".into() }
     }
     pub fn tick(&mut self) {
         let dt = self.last.elapsed().as_secs_f32();
@@ -37,8 +39,9 @@ impl App {
             self.position = (self.position + dt).min(self.duration);
         }
         if let Some(i) = lyrics::active_line(&self.lines, self.position) {
-            self.scroll += ((i as f32) - self.scroll) * dt.min(1.0) * 4.0;
+            self.scroll.target(i as f32);
         }
+        self.scroll.advance(dt, 0.8);
     }
     pub fn handle_key(&mut self, k: KeyEvent) {
         match (k.code, k.modifiers) {
@@ -63,15 +66,18 @@ impl App {
     }
     pub fn handle_mouse(&mut self, m: MouseEvent) {
         if let MouseEventKind::Down(_) = m.kind {
-            if m.row > 5 {
-                let idx = ((m.row - 6) as usize).min(self.lines.len().saturating_sub(1));
-                self.position = self.lines[idx].start;
-                self.status = format!("Seeked to {}", self.lines[idx].text);
+            if let Some(hit) = lyric_view::hit_test(&self.hits, m.column, m.row) {
+                self.position = hit.timestamp;
+                self.status = format!("Seeked to line {}", hit.line + 1);
             }
         }
     }
     pub fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
+        f.render_widget(
+            Block::default().style(Style::default().bg(self.palette.bg)),
+            area,
+        );
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints(
@@ -129,7 +135,14 @@ impl App {
                 "  ◀   {}   ▶       Volume {:>3}%       {}",
                 if self.playing { "❚❚" } else { "▶" },
                 self.volume,
-                self.status
+                if self.debug {
+                    format!(
+                        "{} · {:.2}s · {}×{}",
+                        self.status, self.position, area.width, area.height
+                    )
+                } else {
+                    self.status.clone()
+                }
             ))
             .style(Style::default().fg(self.palette.muted)),
             footer[1],
@@ -162,37 +175,21 @@ impl App {
         .wrap(Wrap { trim: false });
         f.render_widget(p, a);
     }
-    fn draw_lyrics(&self, f: &mut Frame, a: Rect) {
-        let active = lyrics::active_line(&self.lines, self.position).unwrap_or(0) as f32;
-        let mut out = Vec::new();
-        for (i, l) in self.lines.iter().enumerate() {
-            let d = (i as f32 - active).abs();
-            let style = if d < 0.5 {
-                Style::default()
-                    .fg(self.palette.fg)
-                    .add_modifier(Modifier::BOLD)
-            } else if d < 1.5 {
-                Style::default().fg(self.palette.muted)
-            } else {
-                Style::default()
-                    .fg(self.palette.muted)
-                    .add_modifier(Modifier::DIM)
-            };
-            out.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(if i as f32 == active { "♪ " } else { "  " }, style),
-                Span::styled(&l.text, style),
-            ]));
-        }
-        let p = Paragraph::new(out)
-            .scroll((self.scroll.max(0.0) as u16, 0))
-            .block(
-                Block::default()
-                    .title("  LYRICS  ·  click a line to seek  ")
-                    .borders(Borders::LEFT)
-                    .border_style(Style::default().fg(self.palette.accent)),
-            );
-        f.render_widget(p, a);
+    fn draw_lyrics(&mut self, f: &mut Frame, a: Rect) {
+        let block = Block::default()
+            .title("  LYRICS · click a line to seek ")
+            .borders(Borders::LEFT)
+            .border_style(Style::default().fg(self.palette.accent));
+        let inner = block.inner(a);
+        f.render_widget(block, a);
+        self.hits = lyric_view::render(
+            f,
+            inner,
+            &self.lines,
+            self.scroll.current,
+            self.position,
+            self.palette,
+        );
     }
 }
 fn fmt(s: f32) -> String {
