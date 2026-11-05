@@ -81,6 +81,8 @@ pub enum PlaybackCommand {
     PlayPause,
     Next,
     Previous,
+    Repeat,
+    Shuffle,
     Seek(f64),
     SetPosition(f64),
     Volume(f64),

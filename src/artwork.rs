@@ -100,23 +100,18 @@ fn decode(bytes: &[u8]) -> Result<Artwork> {
     Ok(Artwork { image, palette })
 }
 pub fn dominant_palette(image: &RgbImage) -> Palette {
-    let mut bins = [(0u64, 0u64, 0u64, 0u64); 512];
+    let mut sums = (0u64, 0u64, 0u64, 0u64);
     for pixel in image.pixels() {
         let [r, g, b] = pixel.0;
         let max = r.max(g).max(b);
         let min = r.min(g).min(b);
-        if max < 20 || min > 240 {
-            continue;
-        }
         let weight = 1 + u64::from(max - min) / 32;
-        let index = ((r as usize / 32) * 64) + ((g as usize / 32) * 8) + (b as usize / 32);
-        let bin = &mut bins[index];
-        bin.0 += u64::from(r) * weight;
-        bin.1 += u64::from(g) * weight;
-        bin.2 += u64::from(b) * weight;
-        bin.3 += weight;
+        sums.0 += u64::from(r) * weight;
+        sums.1 += u64::from(g) * weight;
+        sums.2 += u64::from(b) * weight;
+        sums.3 += weight;
     }
-    let &(r, g, b, n) = bins.iter().max_by_key(|p| p.3).unwrap();
+    let (r, g, b, n) = sums;
     match (r.checked_div(n), g.checked_div(n), b.checked_div(n)) {
         (Some(r), Some(g), Some(b)) => from_artwork((r as u8, g as u8, b as u8)),
         _ => Palette::default(),

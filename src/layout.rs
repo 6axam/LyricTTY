@@ -6,7 +6,7 @@ pub enum Tier {
     Wide,
 }
 pub fn tier(area: Rect) -> Tier {
-    if area.width < 85 || area.height < 22 {
+    if area.width < 60 || area.height < 22 {
         Tier::Compact
     } else if area.width >= 145 {
         Tier::Wide
@@ -36,6 +36,18 @@ pub fn areas(a: Rect, karaoke: bool) -> Areas {
         a.width,
         a.height.saturating_sub(header_h + footer_h),
     );
+    let mut progress = Rect::new(
+        a.x,
+        a.bottom().saturating_sub(footer_h),
+        a.width,
+        u16::from(footer_h > 0),
+    );
+    let mut controls = Rect::new(
+        a.x,
+        progress.y + u16::from(footer_h > 0),
+        a.width,
+        u16::from(footer_h >= 2),
+    );
     let (metadata, lyrics) = if karaoke {
         (Rect::default(), body)
     } else {
@@ -53,10 +65,22 @@ pub fn areas(a: Rect, karaoke: bool) -> Areas {
             }
             t => {
                 let w = if t == Tier::Wide {
-                    a.width * 27 / 100
+                    a.width * 35 / 100
                 } else {
-                    a.width * 32 / 100
+                    a.width * 40 / 100
                 };
+                progress = Rect::new(
+                    a.x + 1,
+                    a.bottom().saturating_sub(footer_h),
+                    w.saturating_sub(2),
+                    u16::from(footer_h > 0),
+                );
+                controls = Rect::new(
+                    progress.x,
+                    progress.y + u16::from(footer_h > 0),
+                    progress.width,
+                    u16::from(footer_h >= 2),
+                );
                 (
                     Rect::new(body.x, body.y, w, body.height),
                     Rect::new(
@@ -74,13 +98,8 @@ pub fn areas(a: Rect, karaoke: bool) -> Areas {
         header: Rect::new(a.x, a.y, a.width, header_h),
         metadata,
         lyrics,
-        progress: Rect::new(a.x, footer, a.width, u16::from(footer_h > 0)),
-        controls: Rect::new(
-            a.x,
-            footer + u16::from(footer_h > 0),
-            a.width,
-            u16::from(footer_h >= 2),
-        ),
+        progress,
+        controls,
         status: if footer_h >= 3 {
             Rect::new(a.x, footer + 2, a.width, footer_h - 2)
         } else {

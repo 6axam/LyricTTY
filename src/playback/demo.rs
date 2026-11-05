@@ -56,6 +56,9 @@ impl PlaybackBackend for DemoBackend {
                 self.state.position = (self.state.position + d).clamp(0.0, 70.0)
             }
             PlaybackCommand::Volume(v) => self.state.volume = v,
+            PlaybackCommand::Repeat | PlaybackCommand::Shuffle => {
+                anyhow::bail!("Unavailable in the silent demo")
+            }
             _ => {}
         }
         Ok(())

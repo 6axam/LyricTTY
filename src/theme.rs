@@ -33,7 +33,7 @@ pub fn contrast(a: Color, b: Color) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 pub fn from_artwork((r, g, b): (u8, u8, u8)) -> Palette {
-    let dark = |v: u8, base: f32| (base + v as f32 * 0.065).round() as u8;
+    let dark = |v: u8, base: f32| (base + v as f32 * 0.12).round() as u8;
     let bg = Color::Rgb(dark(r, 7.0), dark(g, 9.0), dark(b, 10.0));
     let panel = Color::Rgb(dark(r, 16.0), dark(g, 18.0), dark(b, 19.0));
     let lift = |v: u8| (105.0 + v as f32 * 0.5) as u8;

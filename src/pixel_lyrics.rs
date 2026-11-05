@@ -290,7 +290,7 @@ impl PixelLyrics {
         let offset = current + (next - current) * scroll.fract();
         let pane_y = u32::from(area.y) * u32::from(self.cell.1);
         let pane_height = u32::from(area.height) * u32::from(self.cell.1);
-        let center = pane_height as f32 * 0.43 - self.font_px * 0.6;
+        let center = pane_height as f32 * 0.30 - self.font_px * 0.6;
         let mut hits = Vec::new();
         for (i, lyric) in content.iter().enumerate() {
             let id = self.id(i);
@@ -304,7 +304,13 @@ impl PixelLyrics {
                 }
                 continue;
             };
-            let emphasis = (1.0 - (i as f32 - scroll).abs() * 0.3).clamp(0.16, 1.0);
+            let edge = ((top + line.height as i32) as f32 / (pane_height as f32 * 0.22))
+                .min((pane_height as f32 - top as f32) / (pane_height as f32 * 0.22))
+                .clamp(0.0, 1.0);
+            let emphasis = (1.0 - (i as f32 - scroll).abs() * 0.3).clamp(0.16, 1.0)
+                * edge
+                * edge
+                * (3.0 - 2.0 * edge);
             let opacity = (emphasis * 32.0).round() as u8;
             let style = line_style(lyric, position, palette, opacity, &line.words);
             if !line.uploaded || line.style != style {

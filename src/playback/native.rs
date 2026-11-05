@@ -221,6 +221,12 @@ impl PlaybackBackend for NativeBackend {
                             ]))?;
                         }
                     }
+                    PlaybackCommand::Repeat => {
+                        session.request(json!(["cycle-values", "loop-file", "no", "inf"]))?;
+                    }
+                    PlaybackCommand::Shuffle => {
+                        session.request(json!(["playlist-shuffle"]))?;
+                    }
                     _ => unreachable!(),
                 }
             }

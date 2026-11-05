@@ -305,6 +305,14 @@ impl MprisBackend {
             }
             PlaybackCommand::Next => capabilities.next,
             PlaybackCommand::Previous => capabilities.previous,
+            PlaybackCommand::Repeat => {
+                boolean(&player.properties, "CanControl")
+                    && player.properties.contains_key("LoopStatus")
+            }
+            PlaybackCommand::Shuffle => {
+                boolean(&player.properties, "CanControl")
+                    && player.properties.contains_key("Shuffle")
+            }
             PlaybackCommand::Seek(_) | PlaybackCommand::SetPosition(_) => capabilities.seek,
             PlaybackCommand::Volume(_) => capabilities.volume,
             PlaybackCommand::Open(_) => boolean(&player.properties, "CanControl"),
@@ -316,6 +324,17 @@ impl MprisBackend {
             PlaybackCommand::PlayPause => proxy.call::<_, _, ()>("PlayPause", &())?,
             PlaybackCommand::Next => proxy.call::<_, _, ()>("Next", &())?,
             PlaybackCommand::Previous => proxy.call::<_, _, ()>("Previous", &())?,
+            PlaybackCommand::Repeat => {
+                let current: String = proxy.get_property("LoopStatus")?;
+                proxy.set_property(
+                    "LoopStatus",
+                    if current == "Track" { "None" } else { "Track" },
+                )?;
+            }
+            PlaybackCommand::Shuffle => {
+                let current: bool = proxy.get_property("Shuffle")?;
+                proxy.set_property("Shuffle", !current)?;
+            }
             PlaybackCommand::Seek(offset) => {
                 proxy.call::<_, _, ()>("Seek", &(microseconds(offset)?,))?;
             }

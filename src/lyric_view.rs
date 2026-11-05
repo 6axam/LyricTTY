@@ -108,7 +108,7 @@ pub fn render(
     let anchor = scroll.floor() as usize;
     let offset = offsets[anchor]
         + (offsets[(anchor + 1).min(lines.len())] - offsets[anchor]) * scroll.fract();
-    let center = area.y as f32 + (area.height as f32 * 0.45).floor();
+    let center = area.y as f32 + (area.height as f32 * 0.30).floor();
     for (i, (line, rows)) in lines.iter().zip(wrapped.iter()).enumerate() {
         for (ri, glyphs) in rows.iter().enumerate() {
             let y = center + offsets[i] - offset + ri as f32 * 2.0;
@@ -119,7 +119,11 @@ pub fn render(
                     continue;
                 }
                 let distance = (i as f32 - scroll).abs();
-                let emphasis = (1.0 - distance * 0.38).clamp(0.22, 1.0);
+                let edge = ((row - area.y as f32 + 1.0) / (area.height as f32 * 0.22))
+                    .min((area.bottom() as f32 - row) / (area.height as f32 * 0.22))
+                    .clamp(0.0, 1.0);
+                let emphasis =
+                    (1.0 - distance * 0.38).clamp(0.22, 1.0) * edge * edge * (3.0 - 2.0 * edge);
                 let style = Style::default().add_modifier(Modifier::BOLD);
                 let spans = glyphs
                     .iter()

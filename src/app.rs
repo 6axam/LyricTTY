@@ -420,6 +420,8 @@ impl App {
             KeyCode::Char(' ') => self.command(PlaybackCommand::PlayPause),
             KeyCode::Char('n') => self.command(PlaybackCommand::Next),
             KeyCode::Char('p') => self.command(PlaybackCommand::Previous),
+            KeyCode::Char('R') => self.command(PlaybackCommand::Repeat),
+            KeyCode::Char('x') => self.command(PlaybackCommand::Shuffle),
             KeyCode::Right | KeyCode::Char('l') => self.command(PlaybackCommand::Seek(5.0)),
             KeyCode::Left | KeyCode::Char('h') => self.command(PlaybackCommand::Seek(-5.0)),
             KeyCode::Up | KeyCode::Char('k') => self.volume(0.05),
@@ -597,9 +599,11 @@ impl App {
                     self.seek(t);
                 } else if self.controls_rect.contains((m.column, m.row).into()) {
                     match m.column.saturating_sub(self.controls_rect.x) {
-                        0..=8 => self.command(PlaybackCommand::Previous),
-                        9..=20 => self.command(PlaybackCommand::PlayPause),
-                        21..=30 => self.command(PlaybackCommand::Next),
+                        0..=2 => self.command(PlaybackCommand::Shuffle),
+                        3..=5 => self.command(PlaybackCommand::Previous),
+                        6..=9 => self.command(PlaybackCommand::PlayPause),
+                        10..=12 => self.command(PlaybackCommand::Next),
+                        13..=15 => self.command(PlaybackCommand::Repeat),
                         _ => {
                             self.manual_line = None;
                         }
@@ -665,7 +669,7 @@ impl App {
         let title = if self.manual_line.is_some() {
             "  LYRICS · LIVE ↓ [f] "
         } else {
-            "  LYRICS "
+            "  ♪ Текст песни  ·  LIVE "
         };
         let block = Block::default()
             .title(title)
@@ -780,14 +784,9 @@ impl App {
             .unwrap_or(0);
         f.render_widget(
             Paragraph::new(format!(
-                "  ◀ prev    {}     next ▶     vol {}%    {}",
-                if playing { "❚❚ pause" } else { "▶ play " },
-                volume,
-                if self.manual_line.is_some() {
-                    "LIVE ↓ [f]"
-                } else {
-                    ""
-                }
+                " ⇄  ◀  {}  ▶  ↻    vol {}%",
+                if playing { "❚❚" } else { "▶ " },
+                volume
             ))
             .style(Style::default().fg(p.accent)),
             areas.controls,
@@ -1015,6 +1014,7 @@ impl App {
             .collect(),
             _ => [
                 "Space play/pause   n/p next/previous",
+                "x shuffle         R repeat track",
                 "←→ or h/l seek     ↑↓ or k/j volume",
                 "s sources         o or / open URL",
                 "L karaoke         , settings",
