@@ -58,6 +58,10 @@ pub struct App {
     cover_protocol: Option<StatefulProtocol>,
     pixel_lyrics: Option<PixelLyrics>,
     pixel_active: bool,
+    panel_renderer: Option<lyrictty::player_panel::PanelRenderer>,
+    panel_protocol: Option<StatefulProtocol>,
+    panel_key: String,
+    graphical_panel: bool,
     instrumental: InstrumentalState,
     manual_line: Option<usize>,
     plain_scroll: u16,
@@ -100,6 +104,10 @@ impl App {
             cover_protocol: None,
             pixel_lyrics: None,
             pixel_active: false,
+            panel_renderer: None,
+            panel_protocol: None,
+            panel_key: String::new(),
+            graphical_panel: false,
             instrumental: InstrumentalState::default(),
             manual_line: None,
             plain_scroll: 0,
@@ -121,11 +129,17 @@ impl App {
         }
     }
     pub fn setup_pixel_lyrics(&mut self) {
+        self.panel_renderer = self
+            .picker
+            .as_ref()
+            .filter(|p| p.protocol_type() == ratatui_image::picker::ProtocolType::Kitty)
+            .and_then(|_| lyrictty::player_panel::PanelRenderer::new().ok());
         self.pixel_lyrics = self
             .picker
             .as_ref()
             .filter(|p| {
                 p.protocol_type() == ratatui_image::picker::ProtocolType::Kitty
+                    && std::env::var_os("TMUX").is_none()
                     && std::env::var_os("TMUX").is_none()
             })
             .and_then(|p| PixelLyrics::system_font(p.font_size()).ok());
@@ -147,6 +161,10 @@ impl App {
         self.dirty = true;
     }
     pub fn cleanup_graphics(&mut self, output: &mut impl std::io::Write) -> std::io::Result<()> {
+        if self.panel_protocol.is_some() {
+            let id = 0x5000_0000 | (std::process::id() & 0x00ff_ffff);
+            output.write_all(format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").as_bytes())?;
+        }
         if let Some(renderer) = &mut self.pixel_lyrics {
             renderer.cleanup(output)?;
         }
@@ -331,9 +349,9 @@ impl App {
                             let width = art
                                 .image
                                 .width()
-                                .min(art.image.height().saturating_mul(8) / 5)
+                                .min(art.image.height().saturating_mul(2))
                                 .max(1);
-                            let height = art.image.height().min(width.saturating_mul(5) / 8).max(1);
+                            let height = art.image.height().min(width / 2).max(1);
                             let cropped = image::imageops::crop_imm(
                                 &art.image,
                                 (art.image.width() - width) / 2,
@@ -343,7 +361,7 @@ impl App {
                             )
                             .to_image();
                             let mut cover = image::DynamicImage::ImageRgb8(cropped).into_rgba8();
-                            let radius = (height as f32 * 0.045).max(1.0);
+                            let radius = (height as f32 * 0.075).max(1.0);
                             for (x, y, pixel) in cover.enumerate_pixels_mut() {
                                 let dx = (radius
                                     - (x as f32 + 0.5).min(width as f32 - x as f32 - 0.5))
@@ -616,6 +634,18 @@ impl App {
                     let t = hit.timestamp;
                     self.seek(t);
                 } else if self.controls_rect.contains((m.column, m.row).into()) {
+                    if self.graphical_panel {
+                        let slot = m.column.saturating_sub(self.controls_rect.x) as u32 * 5
+                            / self.controls_rect.width.max(1) as u32;
+                        self.command(match slot {
+                            0 => PlaybackCommand::Shuffle,
+                            1 => PlaybackCommand::Previous,
+                            2 => PlaybackCommand::PlayPause,
+                            3 => PlaybackCommand::Next,
+                            _ => PlaybackCommand::Repeat,
+                        });
+                        return;
+                    }
                     match m.column.saturating_sub(self.controls_rect.x) {
                         0..=2 => self.command(PlaybackCommand::Shuffle),
                         3..=5 => self.command(PlaybackCommand::Previous),
@@ -638,7 +668,13 @@ impl App {
         self.pixel_active = false;
         let a = f.area();
         let p = self.theme.palette();
-        let areas = layout::areas(a, self.karaoke);
+        let cell = self
+            .pixel_lyrics
+            .as_ref()
+            .map(|r| r.cell_size())
+            .or_else(|| self.picker.as_ref().map(|p| p.font_size()))
+            .unwrap_or((8, 16));
+        let areas = layout::areas_with_cell(a, self.karaoke, cell);
         self.lyric_rect = areas.lyrics;
         self.progress_rect = areas.progress;
         self.controls_rect = areas.controls;
@@ -658,26 +694,21 @@ impl App {
                 Rect::new(a.x, y, a.width, 1),
             );
         }
-        let source = self.source();
-        let source_name = source
-            .map(|s| s.source_name.as_str())
-            .unwrap_or("No source");
-        if !self.karaoke && tier_for(a) != Tier::Compact {
-            let panel_y = areas.metadata.bottom().saturating_sub(4);
+        self.graphical_panel = self.draw_player_panel(f, areas.panel, cell);
+        if !areas.panel.is_empty() && !self.graphical_panel {
             f.render_widget(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(theme::mix(p.panel, p.muted, 0.25)))
+                    .border_style(Style::default().fg(theme::mix(p.panel, p.muted, 0.12)))
                     .style(Style::default().bg(p.panel)),
-                Rect::new(
-                    areas.metadata.x,
-                    panel_y,
-                    areas.metadata.width,
-                    areas.controls.bottom().saturating_sub(panel_y) + 1,
-                ),
+                areas.panel,
             );
         }
+        let source = self.source();
+        let source_name = source
+            .map(|s| s.source_name.as_str())
+            .unwrap_or("No source");
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  LYRICTTY", Style::default().fg(p.accent).bold()),
@@ -696,7 +727,23 @@ impl App {
             ])),
             areas.header,
         );
-        if !areas.metadata.is_empty() {
+        if !areas.cover.is_empty() {
+            if self.config.show_artwork {
+                self.draw_artwork(f, areas.cover);
+            }
+            if !self.graphical_panel {
+                self.draw_meta(
+                    f,
+                    Rect::new(
+                        areas.panel.x + 2,
+                        areas.panel.y + 1,
+                        areas.panel.width.saturating_sub(4),
+                        3,
+                    ),
+                    Tier::Compact,
+                );
+            }
+        } else if !areas.metadata.is_empty() {
             self.draw_meta(f, areas.metadata, tier_for(a));
         }
         self.hits.clear();
@@ -812,7 +859,9 @@ impl App {
             ),
             Span::styled(format!("  {}", fmt(duration)), Style::default().fg(p.muted)),
         ]);
-        f.render_widget(Paragraph::new(bar), areas.progress);
+        if !self.graphical_panel {
+            f.render_widget(Paragraph::new(bar), areas.progress);
+        }
         let playing = self
             .source()
             .is_some_and(|s| s.status == PlaybackStatus::Playing);
@@ -828,11 +877,26 @@ impl App {
             control_width,
             areas.controls.height,
         );
-        f.render_widget(
-            Paragraph::new(control_text).style(Style::default().fg(p.fg).bg(p.panel)),
-            self.controls_rect,
-        );
-        if areas.controls.width >= 30 {
+        if self.graphical_panel {
+            self.progress_rect = Rect::new(
+                areas.panel.x + areas.panel.width * 12 / 100,
+                areas.panel.y + areas.panel.height * 54 / 100,
+                areas.panel.width * 74 / 100,
+                2,
+            );
+            self.controls_rect = Rect::new(
+                areas.panel.x + areas.panel.width * 30 / 100,
+                areas.panel.y + areas.panel.height * 70 / 100,
+                areas.panel.width * 40 / 100,
+                (areas.panel.height * 23 / 100).max(2),
+            );
+        } else {
+            f.render_widget(
+                Paragraph::new(control_text).style(Style::default().fg(p.fg).bg(p.panel)),
+                self.controls_rect,
+            );
+        }
+        if !self.graphical_panel && areas.controls.width >= 30 {
             f.render_widget(
                 Paragraph::new(format!("◖ {volume}%"))
                     .style(Style::default().fg(p.muted).bg(p.panel)),
@@ -866,6 +930,68 @@ impl App {
             self.draw_overlay(f);
         }
         self.dirty = false;
+    }
+    fn draw_player_panel(&mut self, f: &mut Frame, area: Rect, cell: (u16, u16)) -> bool {
+        if area.is_empty() || self.panel_renderer.is_none() || self.picker.is_none() {
+            return false;
+        }
+        let width = u32::from(area.width) * u32::from(cell.0);
+        let height = u32::from(area.height) * u32::from(cell.1);
+        if width < 100 || height < 60 || u64::from(width) * u64::from(height) > 4_000_000 {
+            return false;
+        }
+        let source = self.source();
+        let title = source
+            .map(|s| s.track.title.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Your music, alive.");
+        let artist = source
+            .map(|s| s.track.artist.as_str())
+            .unwrap_or("LyricTTY");
+        let position = (self.position() * 2.0).floor() / 2.0;
+        let duration = source.map(|s| s.track.duration as f32).unwrap_or(0.0);
+        let playing = source.is_some_and(|s| s.status == PlaybackStatus::Playing);
+        let volume = source.map(|s| s.volume as f32).unwrap_or(1.0);
+        let palette = self.theme.palette();
+        let key = format!("{width}:{height}:{title}:{artist}:{position}:{duration}:{playing}:{volume}:{palette:?}");
+        if self.panel_key != key {
+            let image = self.panel_renderer.as_ref().unwrap().render(
+                width,
+                height,
+                &lyrictty::player_panel::PanelData {
+                    title,
+                    artist,
+                    position,
+                    duration,
+                    playing,
+                    volume,
+                    palette,
+                },
+            );
+            let source = ratatui_image::protocol::ImageSource::new(
+                image::DynamicImage::ImageRgba8(image),
+                cell,
+                image::Rgba([0, 0, 0, 0]),
+            );
+            let protocol = ratatui_image::protocol::StatefulProtocolType::Kitty(
+                ratatui_image::protocol::kitty::StatefulKitty::new(
+                    0x5000_0000 | (std::process::id() & 0x00ff_ffff),
+                    false,
+                ),
+            );
+            self.panel_protocol = Some(StatefulProtocol::new(source, cell, protocol));
+            self.panel_key = key;
+        }
+        if let Some(protocol) = &mut self.panel_protocol {
+            f.render_stateful_widget(
+                StatefulImage::default().resize(Resize::Scale(None)),
+                area,
+                protocol,
+            );
+            true
+        } else {
+            false
+        }
     }
     fn draw_meta(&mut self, f: &mut Frame, a: Rect, tier: Tier) {
         let p = self.theme.palette();
@@ -1097,9 +1223,9 @@ fn draw_cover(f: &mut Frame, a: Rect, art: &Artwork) {
     let width = art
         .image
         .width()
-        .min(art.image.height().saturating_mul(8) / 5)
+        .min(art.image.height().saturating_mul(2))
         .max(1);
-    let height = art.image.height().min(width.saturating_mul(5) / 8).max(1);
+    let height = art.image.height().min(width / 2).max(1);
     let crop = image::imageops::crop_imm(
         &art.image,
         (art.image.width() - width) / 2,

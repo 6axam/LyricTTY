@@ -108,7 +108,7 @@ pub fn render(
     let anchor = scroll.floor() as usize;
     let offset = offsets[anchor]
         + (offsets[(anchor + 1).min(lines.len())] - offsets[anchor]) * scroll.fract();
-    let center = area.y as f32 + (area.height as f32 * 0.30).floor();
+    let center = area.y as f32 + (area.height as f32 * 0.14).floor();
     for (i, (line, rows)) in lines.iter().zip(wrapped.iter()).enumerate() {
         for (ri, glyphs) in rows.iter().enumerate() {
             let y = center + offsets[i] - offset + ri as f32 * 2.0;

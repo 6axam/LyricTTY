@@ -16,6 +16,8 @@ pub fn tier(area: Rect) -> Tier {
 }
 #[derive(Debug)]
 pub struct Areas {
+    pub cover: Rect,
+    pub panel: Rect,
     pub header: Rect,
     pub metadata: Rect,
     pub lyrics: Rect,
@@ -24,31 +26,46 @@ pub struct Areas {
     pub status: Rect,
 }
 pub fn areas(a: Rect, karaoke: bool) -> Areas {
+    areas_with_cell(a, karaoke, (8, 16))
+}
+pub fn areas_with_cell(a: Rect, karaoke: bool, cell: (u16, u16)) -> Areas {
     if !karaoke && tier(a) != Tier::Compact {
-        let margin = (a.width / 28).clamp(2, 6);
-        let top = (a.height / 12).clamp(1, 4);
-        let bottom = (a.height / 14).clamp(1, 4);
-        let gap = (a.width / 30).clamp(3, 7);
+        let margin = (a.width * 4 / 100).max(2);
+        let gap = (a.width * 3 / 100).max(3);
         let usable = a.width.saturating_sub(margin * 2 + gap);
-        let left = (usable * 43 / 100)
-            .min(72)
-            .min(a.height.saturating_sub(top + bottom + 9) * 3);
-        let artwork_h = (left / 3).max(1);
-        let group_h = artwork_h + 9;
-        let group_y = a.y + (a.height.saturating_sub(group_h)) / 2;
+        let available_h = a.height * 76 / 100;
+        let aspect = cell.0.max(1) as f32 / cell.1.max(1) as f32;
+        let mut left = usable * 53 / 100;
+        let mut artwork_h = (left as f32 * aspect / 2.0).round() as u16;
+        let mut panel_h = ((artwork_h as f32 * 0.66).round() as u16).max(8);
+        if artwork_h + panel_h + 1 > available_h {
+            artwork_h = available_h.saturating_sub(9).max(3);
+            panel_h = 8;
+            left = left.min((artwork_h as f32 * 2.0 / aspect) as u16);
+        }
+        let group_h = artwork_h + panel_h + 1;
+        let y = a.y + a.height.saturating_sub(group_h) / 2;
         let x = a.x + margin;
-        let footer = group_y + artwork_h + 5;
+        let panel_y = y + artwork_h + 1;
+        let progress_y = panel_y + panel_h * 53 / 100;
         return Areas {
+            cover: Rect::new(x, y, left, artwork_h),
+            panel: Rect::new(x, panel_y, left, panel_h),
             header: Rect::default(),
-            metadata: Rect::new(x, group_y, left, artwork_h + 5),
+            metadata: Rect::new(x, y, left, progress_y - y),
             lyrics: Rect::new(
                 x + left + gap,
-                a.y + top,
-                usable - left,
-                a.height.saturating_sub(top + bottom),
+                y,
+                a.right().saturating_sub(margin + x + left + gap),
+                group_h,
             ),
-            progress: Rect::new(x + 2, footer, left.saturating_sub(4), 1),
-            controls: Rect::new(x + 2, footer + 2, left.saturating_sub(4), 1),
+            progress: Rect::new(x + 2, progress_y, left.saturating_sub(4), 1),
+            controls: Rect::new(
+                x + 2,
+                panel_y + panel_h * 78 / 100,
+                left.saturating_sub(4),
+                1,
+            ),
             status: Rect::new(
                 a.x + margin,
                 a.bottom() - 1,
@@ -128,6 +145,8 @@ pub fn areas(a: Rect, karaoke: bool) -> Areas {
     };
     let footer = a.bottom().saturating_sub(footer_h);
     Areas {
+        cover: Rect::default(),
+        panel: Rect::default(),
         header: Rect::new(a.x, a.y, a.width, header_h),
         metadata,
         lyrics,

@@ -9,5 +9,6 @@ pub mod lyrics;
 pub mod metadata;
 pub mod pixel_lyrics;
 pub mod playback;
+pub mod player_panel;
 pub mod providers;
 pub mod theme;

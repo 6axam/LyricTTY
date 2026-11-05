@@ -149,7 +149,7 @@ impl PixelLyrics {
         self.content = content.to_vec();
         self.width = width;
         self.karaoke = karaoke;
-        let px = (self.cell.1 as f32 * if karaoke { 2.15 } else { 1.95 }).clamp(26.0, 60.0);
+        let px = (width as f32 * if karaoke { 0.045 } else { 0.066 }).clamp(28.0, 60.0);
         if px != self.font_px {
             self.font_px = px;
             self.glyphs.clear();
@@ -294,7 +294,7 @@ impl PixelLyrics {
         let offset = current + (next - current) * scroll.fract();
         let pane_y = u32::from(area.y) * u32::from(self.cell.1);
         let pane_height = u32::from(area.height) * u32::from(self.cell.1);
-        let center = pane_height as f32 * 0.30 - self.font_px * 0.6;
+        let center = pane_height as f32 * 0.14 - self.font_px * 0.6;
         let mut hits = Vec::new();
         for (i, lyric) in content.iter().enumerate() {
             let id = self.id(i);
