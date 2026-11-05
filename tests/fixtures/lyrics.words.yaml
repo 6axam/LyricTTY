@@ -1,0 +1,23 @@
+version: '1.0'
+metadata:
+  title: Ранок
+  artist: Тестовий виконавець
+  duration_ms: 12000
+lines:
+- text: Привіт, світе 🌍
+  start_ms: 1200
+  end_ms: 2800
+  words:
+  - text: 'Привіт, '
+    start_ms: 1200
+    end_ms: 1900
+  - text: світе 🌍
+    start_ms: 1900
+    end_ms: 2800
+- text: Нова пісня
+  start_ms: 4000
+  end_ms: 6000
+plain: |-
+  Привіт, світе 🌍
+
+  Нова пісня
