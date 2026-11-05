@@ -11,6 +11,8 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Default, Debug)]
 pub struct ScrollState {
@@ -20,6 +22,9 @@ pub struct ScrollState {
     elapsed: f32,
 }
 impl ScrollState {
+    pub fn animating(&self) -> bool {
+        (self.current - self.target).abs() > 0.001
+    }
     pub fn target(&mut self, target: f32) {
         if self.target != target {
             self.origin = self.current;
@@ -28,6 +33,10 @@ impl ScrollState {
         }
     }
     pub fn advance(&mut self, dt: f32, duration: f32) {
+        if !self.animating() {
+            self.current = self.target;
+            return;
+        }
         self.elapsed += dt.max(0.0);
         let t = if duration <= 0.0 {
             1.0
@@ -69,51 +78,129 @@ pub fn render(
     if area.width < 2 || area.height == 0 {
         return hits;
     }
-    let center = area.y as f32 + area.height as f32 * 0.45;
-    // Three terminal rows per lyric leaves room for interpolation without collisions.
-    for (i, line) in lines.iter().enumerate() {
-        let y = center + (i as f32 - scroll) * 3.0;
-        let floor = y.floor();
-        let fraction = y - floor;
-        for (row, weight) in [(floor, 1.0 - fraction), (floor + 1.0, fraction)] {
-            if row < area.y as f32 || row >= area.bottom() as f32 || weight < 0.015 {
-                continue;
-            }
-            let distance = (i as f32 - scroll).abs();
-            let emphasis = (1.0 - distance * 0.38).clamp(0.22, 1.0);
-            let color = mix(palette.bg, palette.fg, weight * emphasis);
-            let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
-            let words = active_word(line, position);
-            let spans = if line.words.is_empty() {
-                vec![Span::styled(line.text.clone(), style)]
-            } else {
-                line.words
+    let width = area.width.saturating_sub(2) as usize;
+    if width == 0 || lines.is_empty() {
+        return hits;
+    }
+    let wrapped: Vec<_> = lines
+        .iter()
+        .map(|l| wrap_line(l, width, position, palette))
+        .collect();
+    let mut offsets = vec![0.0];
+    for rows in &wrapped {
+        offsets.push(offsets.last().unwrap() + ((rows.len() * 2 + 1).max(3)) as f32);
+    }
+    let scroll = scroll.clamp(0.0, lines.len().saturating_sub(1) as f32);
+    let anchor = scroll.floor() as usize;
+    let offset = offsets[anchor]
+        + (offsets[(anchor + 1).min(lines.len())] - offsets[anchor]) * scroll.fract();
+    let center = area.y as f32 + (area.height as f32 * 0.45).floor();
+    for (i, (line, rows)) in lines.iter().zip(wrapped.iter()).enumerate() {
+        for (ri, glyphs) in rows.iter().enumerate() {
+            let y = center + offsets[i] - offset + ri as f32 * 2.0;
+            let floor = y.floor();
+            let fraction = y - floor;
+            for (row, weight) in [(floor, 1.0 - fraction), (floor + 1.0, fraction)] {
+                if row < area.y as f32 || row >= area.bottom() as f32 || weight < 0.015 {
+                    continue;
+                }
+                let distance = (i as f32 - scroll).abs();
+                let emphasis = (1.0 - distance * 0.38).clamp(0.22, 1.0);
+                let style = Style::default().add_modifier(Modifier::BOLD);
+                let spans = glyphs
                     .iter()
-                    .enumerate()
-                    .map(|(wi, w)| {
-                        let target = if Some(wi) == words {
-                            palette.accent
-                        } else if position >= w.end {
-                            palette.fg
-                        } else {
-                            palette.muted
-                        };
-                        Span::styled(w.text.clone(), style.fg(mix(palette.bg, target, weight)))
+                    .map(|g| {
+                        Span::styled(
+                            g.text.clone(),
+                            style.fg(mix(palette.bg, g.color, weight * emphasis)),
+                        )
                     })
-                    .collect()
-            };
-            let rect = Rect::new(area.x + 1, row as u16, area.width - 2, 1);
-            f.render_widget(Paragraph::new(Line::from(spans)), rect);
-            if weight >= 0.5 {
-                hits.push(Hit {
-                    area: rect,
-                    line: i,
-                    timestamp: line.start,
-                });
+                    .collect::<Vec<_>>();
+                let row_width = glyphs.iter().map(|g| g.width).sum::<usize>() as u16;
+                let x = area.x + 1 + (area.width.saturating_sub(2).saturating_sub(row_width)) / 2;
+                let rect = Rect::new(x, row as u16, row_width.min(area.width - 2), 1);
+                f.render_widget(Paragraph::new(Line::from(spans)), rect);
+                if weight >= 0.5 {
+                    // Word regions precede line regions, so their exact timestamp wins.
+                    let mut gx = x;
+                    for glyph in glyphs {
+                        if let Some(timestamp) = glyph.timestamp {
+                            if glyph.width > 0 {
+                                hits.push(Hit {
+                                    area: Rect::new(gx, row as u16, glyph.width as u16, 1),
+                                    line: i,
+                                    timestamp,
+                                });
+                            }
+                        }
+                        gx += glyph.width as u16;
+                    }
+                    hits.push(Hit {
+                        area: rect,
+                        line: i,
+                        timestamp: line.start,
+                    });
+                }
             }
         }
     }
     hits
+}
+struct Glyph {
+    text: String,
+    width: usize,
+    color: Color,
+    timestamp: Option<f32>,
+}
+fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) -> Vec<Vec<Glyph>> {
+    let mut rows = vec![Vec::new()];
+    let mut used = 0;
+    let active = active_word(line, position);
+    let mut push = |text: &str, color: Color, timestamp: Option<f32>| {
+        for g in text.graphemes(true) {
+            let size = g.width();
+            if g == "\n" || (used + size > width && used > 0) {
+                rows.push(Vec::new());
+                used = 0;
+            }
+            if g != "\n" && size <= width {
+                rows.last_mut().unwrap().push(Glyph {
+                    text: g.to_owned(),
+                    width: size,
+                    color,
+                    timestamp,
+                });
+                used += size;
+            }
+        }
+    };
+    if line.words.is_empty() {
+        push(&line.text, palette.fg, None);
+    } else {
+        for (wi, word) in line.words.iter().enumerate() {
+            let count = word.text.graphemes(true).count().max(1);
+            let progress = if word.end > word.start {
+                ((position - word.start) / (word.end - word.start)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            for (gi, g) in word.text.graphemes(true).enumerate() {
+                let color = if position >= word.end {
+                    palette.fg
+                } else if Some(wi) == active {
+                    mix(
+                        palette.muted,
+                        palette.accent,
+                        (progress * count as f32 - gi as f32).clamp(0.0, 1.0),
+                    )
+                } else {
+                    palette.muted
+                };
+                push(g, color, Some(word.start));
+            }
+        }
+    }
+    rows
 }
 #[cfg(test)]
 mod tests {
@@ -147,5 +234,40 @@ mod tests {
         assert_eq!(hit_test(&h, 50, 8).unwrap().timestamp, 140.0);
         assert!(hit_test(&h, 5, 8).is_none());
         assert!(hit_test(&h, 50, 9).is_none());
+    }
+    #[test]
+    fn word_highlighting_and_unicode_wrapping_use_real_timestamps() {
+        use crate::lyrics::LyricWord;
+        let l = LyricLine {
+            start: 0.0,
+            end: 4.0,
+            text: "Привет 世界".into(),
+            words: vec![
+                LyricWord {
+                    text: "Привет ".into(),
+                    start: 0.0,
+                    end: 2.0,
+                },
+                LyricWord {
+                    text: "世界".into(),
+                    start: 2.0,
+                    end: 4.0,
+                },
+            ],
+        };
+        let rows = wrap_line(&l, 8, 2.5, Palette::default());
+        assert!(rows.len() > 1);
+        assert_eq!(
+            rows.iter()
+                .flatten()
+                .map(|g| g.text.as_str())
+                .collect::<String>(),
+            l.text
+        );
+        assert_eq!(rows[0][0].color, Palette::default().fg);
+        assert!(rows
+            .iter()
+            .flatten()
+            .any(|g| g.timestamp == Some(2.0) && g.color != Palette::default().muted));
     }
 }
