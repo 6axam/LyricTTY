@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>LyricTTY browser integration check</title>
+<style>body{background:#101c17;color:#dfeddf;font:22px sans-serif;padding:3rem}audio{width:70%}</style>
+<h1>LyricTTY · browser integration</h1>
+<p>Quiet local audio fixture. This page never contacts the internet.</p>
+<audio controls autoplay loop src="silence.wav"></audio>
+<script>
+const audio=document.querySelector('audio');
+navigator.mediaSession.metadata=new MediaMetadata({title:'Terminal Skyline',artist:'LyricTTY test fixture',album:'Local browser acceptance test'});
+function position(){if(Number.isFinite(audio.duration))navigator.mediaSession.setPositionState({duration:audio.duration,playbackRate:1,position:audio.currentTime});}
+audio.addEventListener('loadedmetadata',position);
+audio.addEventListener('timeupdate',position);
+audio.addEventListener('play',()=>{navigator.mediaSession.playbackState='playing';position();});
+audio.addEventListener('pause',()=>{navigator.mediaSession.playbackState='paused';position();});
+navigator.mediaSession.setActionHandler('play',()=>audio.play());
+navigator.mediaSession.setActionHandler('pause',()=>audio.pause());
+navigator.mediaSession.setActionHandler('seekto',e=>{audio.currentTime=e.seekTime;position();});
+navigator.mediaSession.setActionHandler('seekbackward',e=>{audio.currentTime=Math.max(0,audio.currentTime-(e.seekOffset||5));position();});
+navigator.mediaSession.setActionHandler('seekforward',e=>{audio.currentTime=Math.min(audio.duration,audio.currentTime+(e.seekOffset||5));position();});
+audio.play().catch(()=>{});
+</script>

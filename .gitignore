@@ -5,3 +5,9 @@
 .idea/
 .vscode/
 *.code-workspace
+cookies*.txt
+auth*.json
+tokens*.json
+/pkg/
+/LyricTTY/
+/*.pkg.tar.*
