@@ -1,7 +1,12 @@
 pub mod artwork;
+pub mod assets;
+pub mod config;
+pub mod content;
 pub mod instrumental;
+pub mod layout;
 pub mod lyric_view;
 pub mod lyrics;
+pub mod metadata;
 pub mod playback;
 pub mod providers;
 pub mod theme;

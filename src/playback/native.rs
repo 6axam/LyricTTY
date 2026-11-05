@@ -121,6 +121,9 @@ impl NativeBackend {
 
 impl PlaybackBackend for NativeBackend {
     fn refresh(&mut self) -> Result<Vec<PlaybackSnapshot>> {
+        if let Some(session) = &mut self.session {
+            session.resync_loaded_file()?;
+        }
         let snapshot = self
             .session
             .as_ref()
@@ -250,6 +253,8 @@ struct PlayerState {
     snapshot: PlaybackSnapshot,
     loading: bool,
     ended: bool,
+    file_epoch: u64,
+    resync_loaded_file: bool,
     // Parsed only when the ytdl property changes, never during refresh().
     ytdl: Option<Value>,
 }
@@ -261,6 +266,8 @@ impl PlayerState {
             snapshot: idle_snapshot(),
             loading: false,
             ended: false,
+            file_epoch: 0,
+            resync_loaded_file: false,
             ytdl: None,
         }
     }
@@ -271,6 +278,8 @@ impl PlayerState {
     }
 
     fn clear_file(&mut self) {
+        self.file_epoch = self.file_epoch.wrapping_add(1);
+        self.resync_loaded_file = false;
         for property in FILE_PROPERTIES {
             self.properties.remove(*property);
         }
@@ -294,7 +303,7 @@ impl PlayerState {
             // start-file event. Never carry artwork or tags to the new file.
             self.clear_file();
         }
-        if name == YTDL_RESULT {
+        if name == YTDL_RESULT && self.properties.get(name) != Some(&data) {
             self.ytdl = data
                 .get("stdout")
                 .and_then(Value::as_str)
@@ -330,6 +339,7 @@ impl PlayerState {
                 self.advance_clock();
                 self.loading = false;
                 self.ended = false;
+                self.resync_loaded_file = true;
                 self.properties.insert("idle-active".into(), json!(false));
                 self.rebuild();
                 true
@@ -356,7 +366,7 @@ impl PlayerState {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty());
         let active = path.is_some() && !self.ended && !self.flag("idle-active", true);
-        let loaded = active && !self.loading;
+        let loaded = active && !self.loading && !self.flag("eof-reached", false);
         let paused = self.flag("pause", false) || self.flag("core-idle", false);
         self.snapshot.status = if !loaded {
             PlaybackStatus::Stopped
@@ -501,9 +511,15 @@ fn tag(value: &Value, keys: &[&str]) -> Option<String> {
 }
 
 type Reply = std::result::Result<Value, String>;
+struct Pending {
+    sender: mpsc::SyncSender<Reply>,
+    // A one-time property seed is applied by the reader, in socket order.
+    // Its epoch prevents a delayed old-file reply from reviving stale tags.
+    seed: Option<(u64, &'static str)>,
+}
 struct Shared {
     state: PlayerState,
-    pending: HashMap<u64, mpsc::SyncSender<Reply>>,
+    pending: HashMap<u64, Pending>,
     changed: bool,
     disconnected: Option<String>,
 }
@@ -519,8 +535,8 @@ impl Shared {
         self.state.rebuild();
         self.state.snapshot.capabilities = Capabilities::default();
         self.changed = true;
-        for (_, sender) in self.pending.drain() {
-            let _ = sender.send(Err(reason.clone()));
+        for (_, pending) in self.pending.drain() {
+            let _ = pending.sender.send(Err(reason.clone()));
         }
     }
 }
@@ -639,6 +655,42 @@ impl Session {
     }
 
     fn request(&mut self, command: Value) -> Result<Value> {
+        self.request_inner(command, None)
+    }
+
+    fn resync_loaded_file(&mut self) -> Result<()> {
+        let epoch = {
+            let mut shared = lock(&self.shared);
+            if !std::mem::take(&mut shared.state.resync_loaded_file) {
+                return Ok(());
+            }
+            shared.state.file_epoch
+        };
+        // Observations may coalesce an unavailable -> same-value transition
+        // between files. Seed once on file-loaded, on the caller's I/O worker.
+        // Ordinary refreshes do no IPC, subprocess, or network work.
+        for &property in FILE_PROPERTIES {
+            if lock(&self.shared).state.file_epoch != epoch {
+                break;
+            }
+            if let Err(error) =
+                self.request_inner(json!(["get_property", property]), Some((epoch, property)))
+            {
+                // Live streams and older mpv builds can lack duration, tags or
+                // ytdl user-data. Optional metadata must not disconnect playback.
+                if lock(&self.shared).disconnected.is_some() {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn request_inner(
+        &mut self,
+        command: Value,
+        seed: Option<(u64, &'static str)>,
+    ) -> Result<Value> {
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -651,7 +703,7 @@ impl Session {
             if let Some(error) = &shared.disconnected {
                 bail!("mpv IPC disconnected: {error}");
             }
-            shared.pending.insert(id, sender);
+            shared.pending.insert(id, Pending { sender, seed });
         }
         let mut bytes = serde_json::to_vec(&json!({"command": command, "request_id": id}))?;
         bytes.push(b'\n');
@@ -725,15 +777,25 @@ fn read_messages(mut input: UnixStream, shared: Arc<Mutex<Shared>>) {
                             shared.disconnect("mpv shut down".into());
                         }
                     } else if let Some(id) = message.get("request_id").and_then(Value::as_u64) {
-                        if let Some(sender) = shared.pending.remove(&id) {
+                        if let Some(pending) = shared.pending.remove(&id) {
                             let response = match message.get("error").and_then(Value::as_str) {
                                 Some("success") => {
                                     Ok(message.get("data").cloned().unwrap_or(Value::Null))
                                 }
+                                Some("property unavailable" | "property not found")
+                                    if pending.seed.is_some() =>
+                                {
+                                    Ok(Value::Null)
+                                }
                                 Some(error) => Err(error.into()),
                                 None => Err("IPC response has no error field".into()),
                             };
-                            let _ = sender.send(response);
+                            if let (Some((epoch, property)), Ok(data)) = (pending.seed, &response) {
+                                if shared.state.file_epoch == epoch {
+                                    shared.state.property(property, data.clone());
+                                }
+                            }
+                            let _ = pending.sender.send(response);
                         }
                     }
                 }

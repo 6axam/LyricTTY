@@ -1,208 +1,1160 @@
-use crate::{
-    lyric_view::{self, Hit, ScrollState},
-    lyrics::{self, LyricLine},
-    theme::Palette,
-};
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use lyrictty::{
+    artwork::Artwork,
+    config::Config,
+    content::LyricsContent,
+    instrumental::InstrumentalState,
+    layout::{self, Tier},
+    lyric_view::{self, Hit, ScrollState},
+    lyrics,
+    playback::{
+        select_auto,
+        service::{Event, PlaybackService},
+        AutoSelection, PlaybackCommand, PlaybackSnapshot, PlaybackStatus,
+    },
+    theme::{self, ThemeTransition},
+};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    layout::{Alignment, Rect},
+    style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph, Wrap},
+    widgets::{Block, Clear, Paragraph, Wrap},
     Frame,
 };
-use std::{process::Command, time::Instant};
+use ratatui_image::{picker::Picker, protocol::StatefulProtocol, Resize, StatefulImage};
+use std::{
+    process::Command,
+    time::{Duration, Instant},
+};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Overlay {
+    None,
+    Sources,
+    Open,
+    Help,
+    Settings,
+}
 pub struct App {
     pub should_quit: bool,
-    playing: bool,
-    position: f32,
-    duration: f32,
-    volume: u8,
+    pub config: Config,
+    pub dirty: bool,
+    pub service: Option<PlaybackService>,
+    pub content: LyricsContent,
+    pub asset_request: Option<lyrictty::assets::AssetService>,
+    sources: Vec<PlaybackSnapshot>,
+    manual_source: Option<String>,
+    active_source: Option<String>,
+    track_key: String,
     debug: bool,
-    lines: Vec<LyricLine>,
-    palette: Palette,
     scroll: ScrollState,
     hits: Vec<Hit>,
-    last: Instant,
+    theme: ThemeTransition,
+    artwork: Option<Artwork>,
+    pub picker: Option<Picker>,
+    cover_protocol: Option<StatefulProtocol>,
+    instrumental: InstrumentalState,
+    manual_line: Option<usize>,
+    plain_scroll: u16,
+    manual_until: Instant,
+    overlay: Overlay,
+    selection: usize,
+    url_input: String,
     status: String,
+    karaoke: bool,
+    last: Instant,
+    started: Instant,
+    lyric_rect: Rect,
+    progress_rect: Rect,
+    controls_rect: Rect,
+    overlay_rect: Rect,
+    startup_url: Option<String>,
+    local_lyrics: Option<std::path::PathBuf>,
+    demo: bool,
 }
 impl App {
-    pub fn new(debug: bool) -> Self {
-        Self { should_quit:false, playing:false, position:0.0, duration:238.0, volume:70, debug, lines: lyrics::parse_lrc("[00:00.00]Welcome to LyricTTY\n[00:04.00]Play music from your terminal\n[00:09.00]Connect a browser through MPRIS\n[00:15.00]Every line can seek the song\n[00:22.00]Instrumental · · ·\n[00:30.00]Your lyrics stay alive"), palette: crate::theme::from_artwork((32,65,43)), scroll:ScrollState::default(), hits: Vec::new(), last:Instant::now(), status:"Demo mode · press ? for help".into() }
+    pub fn new(config: Config, debug: bool) -> Self {
+        Self {
+            should_quit: false,
+            config,
+            dirty: true,
+            service: None,
+            content: LyricsContent::default(),
+            asset_request: None,
+            sources: Vec::new(),
+            manual_source: None,
+            active_source: None,
+            track_key: String::new(),
+            debug,
+            scroll: ScrollState::default(),
+            hits: Vec::new(),
+            theme: ThemeTransition::default(),
+            artwork: None,
+            picker: None,
+            cover_protocol: None,
+            instrumental: InstrumentalState::default(),
+            manual_line: None,
+            plain_scroll: 0,
+            manual_until: Instant::now(),
+            overlay: Overlay::None,
+            selection: 0,
+            url_input: String::new(),
+            status: "Discovering music sources… · o open URL · s sources · ? help".into(),
+            karaoke: false,
+            last: Instant::now(),
+            started: Instant::now(),
+            lyric_rect: Rect::default(),
+            progress_rect: Rect::default(),
+            controls_rect: Rect::default(),
+            overlay_rect: Rect::default(),
+            startup_url: None,
+            local_lyrics: None,
+            demo: false,
+        }
+    }
+    pub fn startup(&mut self, url: Option<String>, lyrics: Option<std::path::PathBuf>, demo: bool) {
+        self.startup_url = url;
+        self.local_lyrics = lyrics;
+        self.demo = demo;
+    }
+    fn source(&self) -> Option<&PlaybackSnapshot> {
+        self.active_source
+            .as_ref()
+            .and_then(|id| self.sources.iter().find(|s| &s.source_id == id))
+    }
+    fn position(&self) -> f32 {
+        self.source()
+            .map(|s| s.position_now() as f32)
+            .unwrap_or(0.0)
+    }
+    fn lyric_position(&self) -> f32 {
+        (self.position() + self.config.lyrics_offset_ms as f32 / 1000.0).max(0.0)
+    }
+    fn command(&mut self, c: PlaybackCommand) {
+        if let (Some(id), Some(service)) = (&self.active_source, &self.service) {
+            service.command(id, c);
+        } else {
+            self.status = "Choose an available source with s".into();
+        }
+        self.dirty = true;
+    }
+    fn seek(&mut self, timestamp: f32) {
+        if self.source().is_some_and(|s| s.capabilities.seek) {
+            self.command(PlaybackCommand::SetPosition(timestamp.max(0.0) as f64));
+        } else {
+            self.status = "Seeking is unavailable for this source".into();
+        }
+    }
+    fn update_sources(&mut self, sources: Vec<PlaybackSnapshot>) {
+        let disconnected = self
+            .active_source
+            .as_ref()
+            .is_some_and(|id| !sources.iter().any(|s| &s.source_id == id));
+        self.sources = sources;
+        if disconnected {
+            self.status = "Source disconnected · choose a source with s".into();
+            self.manual_source = None;
+            self.active_source = None;
+        }
+        if let Some(id) = &self.manual_source {
+            self.active_source = Some(id.clone());
+        } else {
+            match select_auto(&self.sources) {
+                AutoSelection::One(id) => self.active_source = Some(id),
+                AutoSelection::Ambiguous(_) => {
+                    if self.overlay == Overlay::None {
+                        self.overlay = Overlay::Sources;
+                        self.selection = 0;
+                    }
+                    self.status = "Multiple sources are playing · select one".into();
+                }
+                AutoSelection::None => {
+                    if self.active_source.is_none() {
+                        self.active_source = self
+                            .sources
+                            .iter()
+                            .find(|s| s.source_id != "native")
+                            .or_else(|| self.sources.first())
+                            .map(|s| s.source_id.clone());
+                    }
+                }
+            }
+        }
+        if self.sources.iter().any(|s| s.source_id == "native") {
+            if let Some(url) = self.startup_url.take() {
+                self.open_native(url);
+            }
+        }
+        let key = self
+            .source()
+            .map(|s| {
+                format!(
+                    "{}:{}:{}:{}",
+                    s.source_id, s.track.id, s.track.artist, s.track.title
+                )
+            })
+            .unwrap_or_default();
+        if key != self.track_key {
+            self.track_key = key.clone();
+            self.content = LyricsContent::default();
+            self.artwork = None;
+            self.cover_protocol = None;
+            self.manual_line = None;
+            self.plain_scroll = 0;
+            self.scroll = ScrollState::default();
+            self.theme.set(
+                theme::Palette::default(),
+                self.config.theme_transition_ms as f32 / 1000.0,
+            );
+            if let Some(s) = self.source() {
+                if !s.track.title.is_empty() {
+                    if let Some(worker) = &self.asset_request {
+                        worker.request(key, s.track.clone(), self.local_lyrics.clone(), self.demo);
+                    }
+                }
+            }
+        }
+        self.dirty = true;
+    }
+    fn open_native(&mut self, url: String) {
+        if let Some(service) = &self.service {
+            self.manual_source = Some("native".into());
+            self.active_source = Some("native".into());
+            service.command("native", PlaybackCommand::Open(url));
+            self.status = "Opening media in mpv…".into();
+        }
     }
     pub fn tick(&mut self) {
         let dt = self.last.elapsed().as_secs_f32();
         self.last = Instant::now();
-        if self.playing {
-            self.position = (self.position + dt).min(self.duration);
+        let mut events = Vec::new();
+        if let Some(service) = &self.service {
+            while let Ok(event) = service.events.try_recv() {
+                events.push(event);
+            }
         }
-        if let Some(i) = lyrics::active_line(&self.lines, self.position) {
-            self.scroll.target(i as f32);
+        for event in events {
+            match event {
+                Event::Sources(s) => self.update_sources(s),
+                Event::Error(e) => {
+                    self.status = e;
+                    self.dirty = true;
+                }
+            }
         }
-        self.scroll.advance(dt, 0.8);
+        let mut assets = Vec::new();
+        if let Some(worker) = &self.asset_request {
+            while let Ok(event) = worker.events.try_recv() {
+                assets.push(event);
+            }
+        }
+        for event in assets {
+            match event {
+                lyrictty::assets::AssetEvent::Lyrics { key, content } if key == self.track_key => {
+                    self.status = format!("{} · s sources · o open · ? help", content.quality);
+                    self.content = content;
+                    self.dirty = true;
+                }
+                lyrictty::assets::AssetEvent::Artwork { key, artwork } if key == self.track_key => {
+                    self.theme.set(
+                        artwork.palette,
+                        self.config.theme_transition_ms as f32 / 1000.0,
+                    );
+                    self.artwork = Some(artwork);
+                    self.cover_protocol = self.picker.as_ref().and_then(|picker| {
+                        self.artwork.as_ref().map(|art| {
+                            let size = art.image.width().min(art.image.height());
+                            let square = image::imageops::crop_imm(
+                                &art.image,
+                                (art.image.width() - size) / 2,
+                                (art.image.height() - size) / 2,
+                                size,
+                                size,
+                            )
+                            .to_image();
+                            picker.new_resize_protocol(image::DynamicImage::ImageRgb8(square))
+                        })
+                    });
+                    self.dirty = true;
+                }
+                _ => {}
+            }
+        }
+        if self.manual_line.is_some() && Instant::now() >= self.manual_until {
+            self.manual_line = None;
+            self.dirty = true;
+        }
+        let target = self
+            .manual_line
+            .or_else(|| lyrics::active_line(&self.content.lines, self.lyric_position()))
+            .or_else(|| {
+                self.content
+                    .lines
+                    .iter()
+                    .rposition(|line| line.start <= self.lyric_position())
+            })
+            .unwrap_or(0);
+        self.scroll.target(target as f32);
+        self.scroll
+            .advance(dt, self.config.scroll_duration_ms as f32 / 1000.0);
+        self.theme.advance(dt);
+        let duration = self
+            .source()
+            .map(|s| s.track.duration as f32)
+            .unwrap_or(0.0);
+        self.instrumental.update(
+            &self.content.lines,
+            self.lyric_position(),
+            duration,
+            self.config.instrumental_threshold_secs,
+            self.config.instrumental_fade_secs,
+            self.content.instrumental,
+        );
+        self.dirty |= self.scroll.animating()
+            || self.theme.animating()
+            || self
+                .source()
+                .is_some_and(|s| s.status == PlaybackStatus::Playing);
+    }
+    pub fn animating(&self) -> bool {
+        self.scroll.animating()
+            || self.theme.animating()
+            || self.source().is_some_and(|s| {
+                s.status == PlaybackStatus::Playing
+                    && (!self.content.lines.is_empty() || self.instrumental.intensity > 0.0)
+            })
+    }
+    fn manual_scroll(&mut self, delta: isize) {
+        if self.content.lines.is_empty() {
+            self.plain_scroll = self.plain_scroll.saturating_add_signed(delta as i16);
+            return;
+        }
+        let current = self
+            .manual_line
+            .unwrap_or(self.scroll.current.round().max(0.0) as usize);
+        self.manual_line = Some(
+            current
+                .saturating_add_signed(delta)
+                .min(self.content.lines.len() - 1),
+        );
+        self.manual_until =
+            Instant::now() + Duration::from_secs(self.config.manual_follow_timeout_secs as u64);
     }
     pub fn handle_key(&mut self, k: KeyEvent) {
-        match (k.code, k.modifiers) {
-            (KeyCode::Char('q'), _)
-            | (KeyCode::Esc, _)
-            | (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
-            (KeyCode::Char(' '), _) => self.playing = !self.playing,
-            (KeyCode::Right, _) | (KeyCode::Char('l'), _) => {
-                self.position = (self.position + 5.0).min(self.duration)
+        if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
+            self.should_quit = true;
+            return;
+        }
+        self.dirty = true;
+        if self.overlay != Overlay::None {
+            self.overlay_key(k);
+            return;
+        }
+        match k.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char(' ') => self.command(PlaybackCommand::PlayPause),
+            KeyCode::Char('n') => self.command(PlaybackCommand::Next),
+            KeyCode::Char('p') => self.command(PlaybackCommand::Previous),
+            KeyCode::Right | KeyCode::Char('l') => self.command(PlaybackCommand::Seek(5.0)),
+            KeyCode::Left | KeyCode::Char('h') => self.command(PlaybackCommand::Seek(-5.0)),
+            KeyCode::Up | KeyCode::Char('k') => self.volume(0.05),
+            KeyCode::Down | KeyCode::Char('j') => self.volume(-0.05),
+            KeyCode::PageUp => self.manual_scroll(-1),
+            KeyCode::PageDown => self.manual_scroll(1),
+            KeyCode::Enter => {
+                if let Some(line) = self.manual_line.and_then(|i| self.content.lines.get(i)) {
+                    self.seek(line.start);
+                }
             }
-            (KeyCode::Left, _) | (KeyCode::Char('h'), _) => {
-                self.position = (self.position - 5.0).max(0.0)
+            KeyCode::Char('f') => self.manual_line = None,
+            KeyCode::Char('s') => {
+                self.overlay = Overlay::Sources;
+                self.selection = 0;
             }
-            (KeyCode::Up, _) => self.volume = (self.volume + 5).min(100),
-            (KeyCode::Down, _) => self.volume = self.volume.saturating_sub(5),
-            (KeyCode::Char('?'), _) => {
-                self.status =
-                    "Space play/pause · arrows seek/volume · q quit · click lyrics to seek".into()
+            KeyCode::Char('o') | KeyCode::Char('/') => {
+                self.overlay = Overlay::Open;
+                self.url_input.clear();
+            }
+            KeyCode::Char('L') => self.karaoke = !self.karaoke,
+            KeyCode::Esc => self.karaoke = false,
+            KeyCode::Char(',') => {
+                self.overlay = Overlay::Settings;
+                self.selection = 0;
+            }
+            KeyCode::Char('?') => self.overlay = Overlay::Help,
+            _ => {}
+        }
+    }
+    pub fn handle_paste(&mut self, text: &str) {
+        if self.overlay == Overlay::Open {
+            self.url_input
+                .extend(text.chars().filter(|c| !c.is_control()));
+            self.dirty = true;
+        }
+    }
+    fn volume(&mut self, delta: f64) {
+        let volume = self.source().map(|s| s.volume).unwrap_or(0.7);
+        self.command(PlaybackCommand::Volume((volume + delta).clamp(0.0, 1.0)));
+    }
+    fn overlay_key(&mut self, k: KeyEvent) {
+        if k.code == KeyCode::Esc {
+            self.overlay = Overlay::None;
+            return;
+        }
+        match self.overlay {
+            Overlay::Open => match k.code {
+                KeyCode::Char(c) => self.url_input.push(c),
+                KeyCode::Backspace => {
+                    self.url_input.pop();
+                }
+                KeyCode::Enter => {
+                    let url = self.url_input.trim().to_owned();
+                    if !url.is_empty() {
+                        self.open_native(url);
+                        self.overlay = Overlay::None;
+                    }
+                }
+                _ => {}
+            },
+            Overlay::Sources => match k.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.selection = self.selection.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.selection = (self.selection + 1).min(self.sources.len())
+                }
+                KeyCode::Enter => self.select_source(),
+                _ => {}
+            },
+            Overlay::Settings => match k.code {
+                KeyCode::Up => self.selection = self.selection.saturating_sub(1),
+                KeyCode::Down => self.selection = (self.selection + 1).min(5),
+                KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter => {
+                    let sign = if k.code == KeyCode::Left { -1 } else { 1 };
+                    match self.selection {
+                        0 => {
+                            self.config.fps = match self.config.fps {
+                                10..=15 => 30,
+                                16..=30 => 60,
+                                _ => 15,
+                            }
+                        }
+                        1 => {
+                            self.config.scroll_duration_ms =
+                                (self.config.scroll_duration_ms as i32 + sign * 100).clamp(0, 2000)
+                                    as u32
+                        }
+                        2 => {
+                            self.config.theme_transition_ms =
+                                (self.config.theme_transition_ms as i32 + sign * 100).clamp(0, 2000)
+                                    as u32
+                        }
+                        3 => self.config.show_artwork = !self.config.show_artwork,
+                        4 => {
+                            self.config.lyrics_offset_ms =
+                                (self.config.lyrics_offset_ms + sign * 100).clamp(-10000, 10000)
+                        }
+                        5 => self.config.low_data = !self.config.low_data,
+                        _ => {}
+                    }
+                    self.status = if self.config.save(&lyrictty::config::config_path()).is_ok() {
+                        "Settings saved · network changes apply on restart".into()
+                    } else {
+                        "Could not save settings".into()
+                    };
+                }
+                _ => {}
+            },
+            Overlay::Help => {
+                if matches!(k.code, KeyCode::Enter | KeyCode::Char('?')) {
+                    self.overlay = Overlay::None;
+                }
+            }
+            Overlay::None => {}
+        }
+    }
+    fn select_source(&mut self) {
+        if self.selection == 0 {
+            self.manual_source = None;
+            self.active_source = None;
+        } else if let Some(s) = self.sources.get(self.selection - 1) {
+            self.manual_source = Some(s.source_id.clone());
+            self.active_source = self.manual_source.clone();
+        }
+        self.overlay = Overlay::None;
+        self.update_sources(self.sources.clone());
+    }
+    pub fn handle_mouse(&mut self, m: MouseEvent) {
+        self.dirty = true;
+        if self.overlay != Overlay::None {
+            if self.overlay == Overlay::Sources
+                && matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+                && self.overlay_rect.contains((m.column, m.row).into())
+                && m.row > self.overlay_rect.y
+                && m.row < self.overlay_rect.bottom().saturating_sub(1)
+                && m.column > self.overlay_rect.x
+                && m.column < self.overlay_rect.right().saturating_sub(1)
+            {
+                let row = m.row.saturating_sub(self.overlay_rect.y + 1) as usize;
+                if row <= self.sources.len() {
+                    self.selection = row;
+                    self.select_source();
+                }
+            }
+            return;
+        }
+        let in_lyrics = self.lyric_rect.contains((m.column, m.row).into());
+        match m.kind {
+            MouseEventKind::ScrollUp => {
+                if in_lyrics {
+                    self.manual_scroll(-1)
+                } else {
+                    self.volume(0.05)
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if in_lyrics {
+                    self.manual_scroll(1)
+                } else {
+                    self.volume(-0.05)
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.progress_rect.contains((m.column, m.row).into()) {
+                    let ratio = (m.column.saturating_sub(self.progress_rect.x)) as f32
+                        / self.progress_rect.width.saturating_sub(1).max(1) as f32;
+                    if let Some(s) = self.source() {
+                        self.seek(ratio * s.track.duration as f32);
+                    }
+                } else if let Some(hit) = lyric_view::hit_test(&self.hits, m.column, m.row) {
+                    let t = hit.timestamp;
+                    self.seek(t);
+                } else if self.controls_rect.contains((m.column, m.row).into()) {
+                    match m.column.saturating_sub(self.controls_rect.x) {
+                        0..=8 => self.command(PlaybackCommand::Previous),
+                        9..=20 => self.command(PlaybackCommand::PlayPause),
+                        21..=30 => self.command(PlaybackCommand::Next),
+                        _ => {
+                            self.manual_line = None;
+                        }
+                    }
+                }
             }
             _ => {}
         }
     }
-    pub fn handle_mouse(&mut self, m: MouseEvent) {
-        if let MouseEventKind::Down(_) = m.kind {
-            if let Some(hit) = lyric_view::hit_test(&self.hits, m.column, m.row) {
-                self.position = hit.timestamp;
-                self.status = format!("Seeked to line {}", hit.line + 1);
-            }
-        }
-    }
     pub fn draw(&mut self, f: &mut Frame) {
-        let area = f.area();
+        let a = f.area();
+        let p = self.theme.palette();
+        let areas = layout::areas(a, self.karaoke);
+        self.lyric_rect = areas.lyrics;
+        self.progress_rect = areas.progress;
+        self.controls_rect = areas.controls;
         f.render_widget(
-            Block::default().style(Style::default().bg(self.palette.bg)),
-            area,
+            Block::default().style(Style::default().bg(p.bg).fg(p.fg)),
+            a,
         );
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(
-                [
-                    Constraint::Length(3),
-                    Constraint::Min(8),
-                    Constraint::Length(5),
-                ]
-                .as_ref(),
-            )
-            .split(area);
-        let header = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "  LYRICTTY",
-                Style::default()
-                    .fg(self.palette.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("   ·   NOW PLAYING   ·   "),
-            Span::styled(
-                if self.playing { "PLAYING" } else { "PAUSED" },
-                Style::default().fg(self.palette.accent),
-            ),
-        ]))
-        .block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(self.palette.muted)),
-        );
-        f.render_widget(header, chunks[0]);
-        let body = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(32), Constraint::Percentage(68)].as_ref())
-            .split(chunks[1]);
-        self.draw_meta(f, body[0]);
-        self.draw_lyrics(f, body[1]);
-        let ratio = (self.position / self.duration).clamp(0.0, 1.0);
-        let footer = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Length(3)].as_ref())
-            .split(chunks[2]);
+        // Quiet vertical gradient, kept dark enough for text over every row.
+        for y in a.y..a.bottom() {
+            let color = theme::mix(
+                p.bg,
+                p.panel,
+                (y - a.y) as f32 / a.height.max(1) as f32 * 0.45,
+            );
+            f.render_widget(
+                Block::default().style(Style::default().bg(color)),
+                Rect::new(a.x, y, a.width, 1),
+            );
+        }
+        let source = self.source();
+        let source_name = source
+            .map(|s| s.source_name.as_str())
+            .unwrap_or("No source");
         f.render_widget(
-            Gauge::default()
-                .block(Block::default().title(format!(
-                    "  {} / {}  ",
-                    fmt(self.position),
-                    fmt(self.duration)
-                )))
-                .gauge_style(Style::default().fg(self.palette.accent))
-                .ratio(ratio as f64),
-            footer[0],
+            Paragraph::new(Line::from(vec![
+                Span::styled("  LYRICTTY", Style::default().fg(p.accent).bold()),
+                Span::styled(
+                    format!(
+                        "   {} · {}",
+                        if self.manual_source.is_none() {
+                            "AUTO"
+                        } else {
+                            "SOURCE"
+                        },
+                        source_name
+                    ),
+                    Style::default().fg(p.muted),
+                ),
+            ])),
+            areas.header,
         );
+        if !areas.metadata.is_empty() {
+            self.draw_meta(f, areas.metadata, tier_for(a));
+        }
+        self.hits.clear();
+        let title = if self.manual_line.is_some() {
+            "  LYRICS · LIVE ↓ [f] "
+        } else {
+            "  LYRICS "
+        };
+        let block = Block::default()
+            .title(title)
+            .style(Style::default().fg(p.muted));
+        let inner = block.inner(areas.lyrics);
+        f.render_widget(block, areas.lyrics);
+        if self.content.lines.is_empty() {
+            let message = if !self.content.plain.is_empty() {
+                self.content.plain.clone()
+            } else if self.content.instrumental {
+                String::new()
+            } else if self.source().is_none() {
+                "Play music in your browser, or press o to open a URL.\n\nLyricTTY will discover MPRIS players automatically.".into()
+            } else {
+                "No synchronized lyrics available\n\nLocal word timing: lyrictty --lyrics song.lrc"
+                    .into()
+            };
+            f.render_widget(
+                Paragraph::new(message)
+                    .wrap(Wrap { trim: false })
+                    .scroll((self.plain_scroll, 0))
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(p.muted)),
+                padded(inner, 2),
+            );
+        } else {
+            let mut faded = p;
+            faded.fg = theme::mix(p.fg, p.bg, self.instrumental.intensity * 0.93);
+            faded.muted = theme::mix(p.muted, p.bg, self.instrumental.intensity * 0.93);
+            faded.accent = theme::mix(p.accent, p.bg, self.instrumental.intensity * 0.93);
+            self.hits = lyric_view::render(
+                f,
+                inner,
+                &self.content.lines,
+                self.scroll.current,
+                self.lyric_position(),
+                faded,
+            );
+        }
+        if self.instrumental.intensity > 0.01 {
+            self.draw_instrumental(f, inner);
+        }
+        let position = self.position();
+        let duration = self
+            .source()
+            .map(|s| s.track.duration as f32)
+            .unwrap_or(0.0);
+        let ratio = if duration > 0.0 {
+            (position / duration).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let bar_width = areas.progress.width.saturating_sub(18) as usize;
+        let done = ((bar_width.saturating_sub(1)) as f32 * ratio).round() as usize;
+        self.progress_rect = Rect::new(
+            areas.progress.x + 8.min(areas.progress.width),
+            areas.progress.y,
+            bar_width as u16,
+            areas.progress.height,
+        );
+        let bar = Line::from(vec![
+            Span::styled(
+                format!(" {:>5}  ", fmt(position)),
+                Style::default().fg(p.muted),
+            ),
+            Span::styled("━".repeat(done), Style::default().fg(p.accent)),
+            Span::styled(
+                if bar_width > 0 { "●" } else { "" },
+                Style::default().fg(p.fg),
+            ),
+            Span::styled(
+                "─".repeat(bar_width.saturating_sub(done + 1)),
+                Style::default().fg(theme::mix(p.panel, p.muted, 0.3)),
+            ),
+            Span::styled(format!("  {}", fmt(duration)), Style::default().fg(p.muted)),
+        ]);
+        f.render_widget(Paragraph::new(bar), areas.progress);
+        let playing = self
+            .source()
+            .is_some_and(|s| s.status == PlaybackStatus::Playing);
+        let volume = self
+            .source()
+            .map(|s| (s.volume * 100.0).round() as u32)
+            .unwrap_or(0);
         f.render_widget(
             Paragraph::new(format!(
-                "  ◀   {}   ▶       Volume {:>3}%       {}",
-                if self.playing { "❚❚" } else { "▶" },
-                self.volume,
-                if self.debug {
-                    format!(
-                        "{} · {:.2}s · {}×{}",
-                        self.status, self.position, area.width, area.height
-                    )
+                "  ◀ prev    {}     next ▶     vol {}%    {}",
+                if playing { "❚❚ pause" } else { "▶ play " },
+                volume,
+                if self.manual_line.is_some() {
+                    "LIVE ↓ [f]"
                 } else {
-                    self.status.clone()
+                    ""
                 }
             ))
-            .style(Style::default().fg(self.palette.muted)),
-            footer[1],
+            .style(Style::default().fg(p.accent)),
+            areas.controls,
+        );
+        let status = if self.debug {
+            format!(
+                "  {} · {:?} · {:.2}s · {}×{}",
+                self.status,
+                tier_for(a),
+                position,
+                a.width,
+                a.height
+            )
+        } else {
+            format!("  {}", self.status)
+        };
+        f.render_widget(
+            Paragraph::new(status).style(Style::default().fg(p.muted)),
+            areas.status,
+        );
+        if self.overlay != Overlay::None {
+            self.draw_overlay(f);
+        }
+        self.dirty = false;
+    }
+    fn draw_meta(&mut self, f: &mut Frame, a: Rect, tier: Tier) {
+        let p = self.theme.palette();
+        let source = self.source();
+        let title = source
+            .map(|s| s.track.title.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Your music, alive.")
+            .to_owned();
+        let artist = source
+            .map(|s| s.track.artist.as_str())
+            .unwrap_or("Native + browser playback")
+            .to_owned();
+        let album = source.map(|s| s.track.album.clone()).unwrap_or_default();
+        if tier == Tier::Compact {
+            let mut metadata = a;
+            if a.height >= 7 && self.config.show_artwork {
+                let art_rect = Rect::new(a.x + 2, a.y, 12, a.height.saturating_sub(1).min(6));
+                self.draw_artwork(f, art_rect);
+                metadata = Rect::new(
+                    a.x + 17,
+                    a.y + 1,
+                    a.width.saturating_sub(19),
+                    a.height.saturating_sub(2),
+                );
+            }
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::styled(title, Style::default().fg(p.fg).bold()),
+                    Line::from(""),
+                    Line::styled(artist, Style::default().fg(p.muted)),
+                ])
+                .wrap(Wrap { trim: true }),
+                metadata,
+            );
+            return;
+        }
+        let mut y = a.y + 1;
+        if self.config.show_artwork {
+            let width = a.width.saturating_sub(4).min(40);
+            let height = (width / 2).min(a.height.saturating_sub(9));
+            let rect = Rect::new(a.x + 2, y, width, height);
+            self.draw_artwork(f, rect);
+            y = y.saturating_add(height + 2);
+        }
+        if y >= a.bottom() {
+            return;
+        }
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::styled(title, Style::default().fg(p.fg).bold()),
+                Line::from(""),
+                Line::styled(artist, Style::default().fg(p.accent)),
+                Line::from(""),
+                Line::styled(album, Style::default().fg(p.muted)),
+                Line::from(""),
+                Line::styled(self.content.quality.as_str(), Style::default().fg(p.muted)),
+            ])
+            .wrap(Wrap { trim: true }),
+            Rect::new(a.x + 2, y, a.width.saturating_sub(4), a.bottom() - y),
         );
     }
-    fn draw_meta(&self, f: &mut Frame, a: Rect) {
-        let art = "      ╭────────╮\n      │  ♫ ♫   │\n      │  ♫ ♫   │\n      ╰────────╯";
-        let p = Paragraph::new(vec![
-            Line::from(art),
-            Line::from(""),
-            Line::from(Span::styled(
-                "LyricTTY Session",
-                Style::default()
-                    .fg(self.palette.fg)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from("Terminal music center"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "SOURCE",
-                Style::default().fg(self.palette.muted),
-            )),
-            Line::from("● Native demo / MPRIS Auto"),
-        ])
-        .block(
-            Block::default()
-                .borders(Borders::RIGHT)
-                .border_style(Style::default().fg(self.palette.panel)),
-        )
-        .wrap(Wrap { trim: false });
-        f.render_widget(p, a);
+    fn draw_artwork(&mut self, f: &mut Frame, area: Rect) {
+        if area.is_empty() {
+            return;
+        }
+        if let Some(protocol) = &mut self.cover_protocol {
+            f.render_stateful_widget(
+                StatefulImage::default()
+                    .resize(Resize::Scale(Some(image::imageops::FilterType::Triangle))),
+                area,
+                protocol,
+            );
+        } else if let Some(art) = &self.artwork {
+            draw_cover(f, area, art);
+        } else {
+            let p = self.theme.palette();
+            f.render_widget(
+                Paragraph::new("\n\n     ♫\n\n  LyricTTY")
+                    .style(Style::default().fg(p.accent).bg(p.panel))
+                    .alignment(Alignment::Center),
+                area,
+            );
+        }
     }
-    fn draw_lyrics(&mut self, f: &mut Frame, a: Rect) {
-        let block = Block::default()
-            .title("  LYRICS · click a line to seek ")
-            .borders(Borders::LEFT)
-            .border_style(Style::default().fg(self.palette.accent));
-        let inner = block.inner(a);
-        f.render_widget(block, a);
-        self.hits = lyric_view::render(
-            f,
-            inner,
-            &self.lines,
-            self.scroll.current,
-            self.position,
-            self.palette,
+    fn draw_instrumental(&self, f: &mut Frame, a: Rect) {
+        if a.width < 10 || a.height < 5 {
+            return;
+        }
+        let p = self.theme.palette();
+        let t = self.started.elapsed().as_secs_f32();
+        let glyphs = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let bars: String = (0..17)
+            .map(|i| {
+                let v = ((t * 1.7 + i as f32 * 0.6).sin() * 0.5 + 0.5) * 6.0;
+                glyphs[v as usize]
+            })
+            .collect();
+        let rect = Rect::new(a.x, a.y + a.height / 2 - 1, a.width, 3);
+        f.render_widget(
+            Paragraph::new(format!("{bars}\n\nINSTRUMENTAL · ambient"))
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme::mix(
+                    p.bg,
+                    p.accent,
+                    self.instrumental.intensity,
+                ))),
+            rect,
         );
+    }
+    fn draw_overlay(&mut self, f: &mut Frame) {
+        let a = f.area();
+        let width = a.width.saturating_sub(4).min(78);
+        let height = a
+            .height
+            .saturating_sub(2)
+            .min(if self.overlay == Overlay::Sources {
+                self.sources.len() as u16 + 6
+            } else {
+                17
+            });
+        let rect = Rect::new(
+            a.x + (a.width - width) / 2,
+            a.y + (a.height - height) / 2,
+            width,
+            height,
+        );
+        self.overlay_rect = rect;
+        f.render_widget(Clear, rect);
+        let p = self.theme.palette();
+        let title = match self.overlay {
+            Overlay::Sources => " Sources ",
+            Overlay::Open => " Open URL / local audio ",
+            Overlay::Settings => " Settings · saved automatically ",
+            _ => " Help ",
+        };
+        let block = Block::bordered()
+            .title(title)
+            .style(Style::default().bg(p.panel).fg(p.fg));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        let lines: Vec<Line> = match self.overlay {
+            Overlay::Sources => std::iter::once("Auto · select active source".to_owned())
+                .chain(
+                    self.sources
+                        .iter()
+                        .map(|s| format!("{} · {:?} · {}", s.source_name, s.status, s.track.title)),
+                )
+                .enumerate()
+                .map(|(i, t)| {
+                    Line::styled(
+                        format!(" {} {}", if self.selection == i { "●" } else { "○" }, t),
+                        Style::default().fg(if self.selection == i {
+                            p.accent
+                        } else {
+                            p.muted
+                        }),
+                    )
+                })
+                .collect(),
+            Overlay::Open => vec![
+                Line::from("Paste a YouTube / YouTube Music / media URL or local path."),
+                Line::from(""),
+                Line::styled(
+                    format!("> {}▏", self.url_input),
+                    Style::default().fg(p.accent),
+                ),
+                Line::from(""),
+                Line::from("Enter play · Esc cancel"),
+            ],
+            Overlay::Settings => [
+                format!("FPS {}", self.config.fps),
+                format!("Lyric transition {} ms", self.config.scroll_duration_ms),
+                format!("Theme transition {} ms", self.config.theme_transition_ms),
+                format!("Artwork {}", self.config.show_artwork),
+                format!("Lyrics offset {} ms", self.config.lyrics_offset_ms),
+                format!("Low data {}", self.config.low_data),
+            ]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                Line::styled(
+                    format!(" {} {}", if self.selection == i { "›" } else { " " }, t),
+                    Style::default().fg(if self.selection == i {
+                        p.accent
+                    } else {
+                        p.muted
+                    }),
+                )
+            })
+            .chain([
+                Line::from(""),
+                Line::from("↑↓ select · ←→ change · Esc close"),
+            ])
+            .collect(),
+            _ => [
+                "Space play/pause   n/p next/previous",
+                "←→ or h/l seek     ↑↓ or k/j volume",
+                "s sources         o or / open URL",
+                "L karaoke         , settings",
+                "Wheel / PgUp/PgDn browse lyrics",
+                "Enter seek selected lyric · f follow live",
+                "Click lyrics/progress/transport to control",
+                "q / Ctrl+C exit   Esc close overlay",
+                "",
+                "Word timing requires local enhanced LRC / Lyricsfile.",
+                "LRCLIB falls back to line sync, plain text, or none.",
+            ]
+            .into_iter()
+            .map(Line::from)
+            .collect(),
+        };
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+}
+fn tier_for(a: Rect) -> Tier {
+    layout::tier(a)
+}
+fn padded(a: Rect, n: u16) -> Rect {
+    Rect::new(
+        a.x + n.min(a.width / 2),
+        a.y + n.min(a.height / 2),
+        a.width.saturating_sub(n * 2),
+        a.height.saturating_sub(n * 2),
+    )
+}
+fn draw_cover(f: &mut Frame, a: Rect, art: &Artwork) {
+    if a.is_empty() {
+        return;
+    }
+    let im = image::imageops::resize(
+        &art.image,
+        a.width as u32,
+        a.height as u32 * 2,
+        image::imageops::FilterType::Triangle,
+    );
+    for y in 0..a.height {
+        let line = Line::from(
+            (0..a.width)
+                .map(|x| {
+                    let top = im.get_pixel(x as u32, y as u32 * 2).0;
+                    let bottom = im.get_pixel(x as u32, y as u32 * 2 + 1).0;
+                    Span::styled(
+                        "▀",
+                        Style::default()
+                            .fg(Color::Rgb(top[0], top[1], top[2]))
+                            .bg(Color::Rgb(bottom[0], bottom[1], bottom[2])),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        f.render_widget(Paragraph::new(line), Rect::new(a.x, a.y + y, a.width, 1));
     }
 }
 fn fmt(s: f32) -> String {
-    format!("{}:{:02}", (s as u32) / 60, (s as u32) % 60)
+    format!("{}:{:02}", s.max(0.0) as u32 / 60, s.max(0.0) as u32 % 60)
 }
 pub fn doctor() -> Result<()> {
-    println!("LyricTTY doctor\n✓ Rust runtime\n✓ terminal UI\n{} mpv\n{} yt-dlp\n{} MPRIS/playerctl\n! YouTube Music account not configured",check("mpv"),check("yt-dlp"),check("playerctl"));
+    println!("LyricTTY doctor (development)");
+    for name in ["mpv", "yt-dlp"] {
+        let ok = Command::new(name)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        println!("{} {name}", if ok { "✓" } else { "!" });
+    }
+    match lyrictty::playback::mpris::MprisBackend::new() {
+        Ok(mut backend) => {
+            use lyrictty::playback::PlaybackBackend;
+            let sources = backend.refresh()?;
+            println!("✓ D-Bus / MPRIS ({} sources)", sources.len());
+            for s in sources {
+                println!(
+                    "  {} · {:?} · seek {}",
+                    s.source_name, s.status, s.capabilities.seek
+                );
+            }
+        }
+        Err(_) => println!("! D-Bus session unavailable"),
+    }
+    println!(
+        "{} Kitty terminal (ANSI artwork fallback enabled)",
+        if std::env::var_os("KITTY_WINDOW_ID").is_some() {
+            "✓"
+        } else {
+            "!"
+        }
+    );
+    println!(
+        "{} PipeWire (ambient fallback; no capture backend)",
+        if Command::new("pw-cli")
+            .arg("info")
+            .arg("0")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            "✓"
+        } else {
+            "!"
+        }
+    );
+    println!("✓ Lyrics: local enhanced LRC / Lyricsfile + LRCLIB\n! YouTube Music account integration unavailable; public URLs use yt-dlp\n✓ No account required");
     Ok(())
 }
-fn check(x: &str) -> &'static str {
-    if Command::new(x).arg("--version").output().is_ok() {
-        "✓"
-    } else {
-        "!"
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+    #[test]
+    fn responsive_ui_handles_tiny_compact_standard_wide_and_resize() {
+        let mut app = App::new(Config::default(), true);
+        for (w, h) in [(1, 1), (12, 4), (60, 18), (110, 30), (170, 50), (45, 12)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| app.draw(f)).unwrap();
+        }
+    }
+    #[test]
+    fn source_disconnection_clears_stale_track() {
+        let mut app = App::new(Config::default(), false);
+        app.update_sources(vec![PlaybackSnapshot {
+            source_id: "mock".into(),
+            track: lyrictty::playback::Track {
+                id: "t".into(),
+                title: "song".into(),
+                ..Default::default()
+            },
+            status: PlaybackStatus::Playing,
+            ..Default::default()
+        }]);
+        assert!(app.source().is_some());
+        app.update_sources(Vec::new());
+        assert!(app.source().is_none());
+        assert!(app.content.lines.is_empty());
+    }
+    #[test]
+    fn auto_does_not_jump_between_multiple_playing_sources() {
+        let mut app = App::new(Config::default(), false);
+        app.update_sources(vec![
+            PlaybackSnapshot {
+                source_id: "a".into(),
+                status: PlaybackStatus::Playing,
+                ..Default::default()
+            },
+            PlaybackSnapshot {
+                source_id: "b".into(),
+                status: PlaybackStatus::Playing,
+                ..Default::default()
+            },
+        ]);
+        assert!(app.active_source.is_none());
+        assert!(app.overlay == Overlay::Sources);
+    }
+    #[test]
+    fn rendered_hit_regions_send_actual_backend_seek_after_resize() {
+        use lyrictty::playback::{Capabilities, PlaybackBackend};
+        use std::sync::{Arc, Mutex};
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let source = PlaybackSnapshot {
+            source_id: "mock".into(),
+            track: lyrictty::playback::Track {
+                id: "track".into(),
+                title: "test".into(),
+                ..Default::default()
+            },
+            capabilities: Capabilities {
+                seek: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        struct Fake {
+            log: Arc<Mutex<Vec<PlaybackCommand>>>,
+            source: PlaybackSnapshot,
+        }
+        impl PlaybackBackend for Fake {
+            fn refresh(&mut self) -> Result<Vec<PlaybackSnapshot>> {
+                Ok(vec![self.source.clone()])
+            }
+            fn command(&mut self, _: &str, c: PlaybackCommand) -> Result<()> {
+                self.log.lock().unwrap().push(c);
+                Ok(())
+            }
+            fn changed(&mut self) -> bool {
+                false
+            }
+        }
+        let worker_log = log.clone();
+        let worker_source = source.clone();
+        let mut app = App::new(Config::default(), false);
+        app.service = Some(PlaybackService::start(move || {
+            (
+                vec![Box::new(Fake {
+                    log: worker_log,
+                    source: worker_source,
+                })],
+                Vec::new(),
+            )
+        }));
+        app.update_sources(vec![source]);
+        app.content.lines = lyrics::parse_lrc("[00:00]zero\n[00:10]one\n[00:20]two\n[00:30]three");
+        app.scroll.target(2.0);
+        app.scroll.advance(1.0, 0.8);
+        for (w, h) in [(120, 32), (52, 17)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| app.draw(f)).unwrap();
+            let hit = app.hits.iter().find(|hit| hit.line == 2).unwrap().clone();
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: hit.area.x,
+                row: hit.area.y,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while log.lock().unwrap().len() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            log.lock()
+                .unwrap()
+                .iter()
+                .filter(|c| matches!(c,PlaybackCommand::SetPosition(p)if (*p-20.0).abs()<0.01))
+                .count()
+                == 2
+        );
+        assert_eq!(
+            app.position(),
+            0.0,
+            "Seek must not fake acknowledgement locally"
+        );
+    }
+    #[test]
+    fn pasted_urls_only_modify_open_dialog() {
+        let mut app = App::new(Config::default(), false);
+        app.handle_paste("q");
+        assert!(!app.should_quit);
+        assert!(app.url_input.is_empty());
+        app.overlay = Overlay::Open;
+        app.handle_paste("https://example.test/q\n");
+        assert_eq!(app.url_input, "https://example.test/q");
     }
 }

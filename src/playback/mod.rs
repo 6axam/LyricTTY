@@ -1,8 +1,10 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
+pub mod demo;
 pub mod mpris;
 pub mod native;
+pub mod service;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Track {

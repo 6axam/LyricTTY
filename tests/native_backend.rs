@@ -45,7 +45,10 @@ def send(message):
 def reply(request, data=None, error='success'):
     send({'request_id': request['request_id'], 'error': error, 'data': data})
 def prop(name, value):
+    unchanged = name in props and props[name] == value
     props[name] = value
+    if scenario == 'coalesced' and unchanged:
+        return
     if name in observed:
         send({'event': 'property-change', 'name': name, 'data': value})
 def load(path, index=0, start=True):
@@ -85,6 +88,9 @@ for line in reader:
         load(command[1], start=scenario != 'path-only')
         reply(request)
     elif name == 'get_property':
+        if scenario == 'missing-properties' and command[1] in ('metadata', 'duration', 'user-data/mpv/ytdl/json-subprocess-result'):
+            reply(request, error='property unavailable')
+            continue
         reply(request, props.get(command[1]))
     elif name == 'set_property' and command[1] == 'volume':
         volume = round(command[2])
@@ -112,6 +118,8 @@ for line in reader:
             send({'event': 'end-file', 'reason': 'eof'})
             prop('idle-active', True)
             prop('playlist-pos', -1)
+        if scenario == 'events' and volume == 88:
+            prop('eof-reached', True)
         prop('volume', command[2])
         reply(request)
     elif name == 'set_property':
@@ -179,6 +187,18 @@ impl Mock {
     fn marker(&self, name: &str) -> String {
         fs::read_to_string(self.directory.path().join(name)).unwrap()
     }
+}
+
+#[test]
+fn unavailable_optional_file_properties_do_not_disconnect_playback() {
+    let mut mock = Mock::new("missing-properties");
+    mock.open("mock:stream");
+    let state = snapshot(&mut mock.backend);
+    assert_eq!(state.status, PlaybackStatus::Playing);
+    mock.backend
+        .command("native", PlaybackCommand::Pause)
+        .unwrap();
+    wait_snapshot(&mut mock.backend, |s| s.status == PlaybackStatus::Paused);
 }
 
 fn snapshot(backend: &mut NativeBackend) -> PlaybackSnapshot {
@@ -393,6 +413,34 @@ fn track_change_without_start_event_clears_artwork_and_old_position() {
 }
 
 #[test]
+fn identical_properties_are_reseeded_once_when_observations_coalesce() {
+    let mut mock = Mock::new("coalesced");
+    mock.open("mock:first");
+    mock.open("mock:first");
+    let same = snapshot(&mut mock.backend);
+    assert_eq!(same.track.title, "Tagged title 0");
+    assert_eq!(same.track.artist, "Test artist");
+    assert_eq!(same.track.album, "Test album");
+    assert_eq!(same.track.duration, 120.0);
+    assert!(same.capabilities.seek);
+    assert_eq!(
+        same.track.artwork_url.as_deref(),
+        Some("https://art.invalid/first.jpg")
+    );
+    mock.open("mock:second");
+    let other = snapshot(&mut mock.backend);
+    assert_eq!(other.track.title, "Tagged title 0");
+    assert_eq!(other.track.duration, 120.0);
+    assert!(other.capabilities.seek);
+    assert_eq!(other.track.artwork_url, None);
+    let commands = mock.commands();
+    for _ in 0..20 {
+        let _ = snapshot(&mut mock.backend);
+    }
+    assert_eq!(commands, mock.commands());
+}
+
+#[test]
 fn property_events_update_live_tags_rate_and_end_of_file() {
     let mut mock = Mock::new("events");
     mock.open("mock:first");
@@ -413,6 +461,12 @@ fn property_events_update_live_tags_rate_and_end_of_file() {
     assert!((21.0..22.0).contains(&state.position_now()));
     thread::sleep(Duration::from_millis(30));
     assert!(snapshot(&mut mock.backend).position_now() > state.position_now() - 0.01);
+    mock.backend
+        .command("native", PlaybackCommand::Volume(0.88))
+        .unwrap();
+    let eof = snapshot(&mut mock.backend);
+    assert_eq!(eof.status, PlaybackStatus::Stopped);
+    assert!(!eof.capabilities.pause && !eof.capabilities.seek);
     mock.backend
         .command("native", PlaybackCommand::Volume(0.77))
         .unwrap();
