@@ -1,0 +1,17 @@
+[package]
+name = "lyrictty"
+version = "0.1.0"
+edition = "2021"
+description = "Synced lyrics and adaptive music UI for your terminal"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.28"
+dirs = "5"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
