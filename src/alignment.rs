@@ -3,6 +3,7 @@ use crate::{assets::AssetEvent, content::LyricsContent, lyrics::LyricLine, playb
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::VecDeque,
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -22,12 +23,18 @@ pub struct AlignmentHandle {
     generation: Arc<AtomicU64>,
     stopped: Arc<AtomicBool>,
     worker: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+    prefetch: Arc<Mutex<VecDeque<Request>>>,
+    prefetch_epoch: Arc<AtomicU64>,
+    foreground_waiting: Arc<AtomicBool>,
+    threads: usize,
 }
+#[derive(Clone)]
 struct Request {
     key: String,
     track: Track,
     content: LyricsContent,
     generation: u64,
+    prefetch_epoch: Option<u64>,
 }
 #[derive(Serialize, Deserialize)]
 struct Cached {
@@ -47,29 +54,88 @@ struct Update {
 
 impl AlignmentHandle {
     pub fn start(cache: PathBuf, events: Sender<AssetEvent>) -> Self {
+        Self::start_with_threads(cache, events, 0)
+    }
+    pub fn start_with_threads(
+        cache: PathBuf,
+        events: Sender<AssetEvent>,
+        requested: usize,
+    ) -> Self {
         let (requests, rx) = mpsc::channel::<Request>();
+        let available = thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let threads = if requested == 0 {
+            available
+        } else {
+            requested.min(available).max(1)
+        };
         let handle = Self {
             requests,
             generation: Arc::new(AtomicU64::new(0)),
             stopped: Arc::new(AtomicBool::new(false)),
             worker: Arc::new(Mutex::new(None)),
+            prefetch: Arc::new(Mutex::new(VecDeque::new())),
+            prefetch_epoch: Arc::new(AtomicU64::new(0)),
+            foreground_waiting: Arc::new(AtomicBool::new(false)),
+            threads,
         };
         let worker = handle.clone();
         let task = thread::spawn(move || {
             while !worker.stopped.load(Ordering::Relaxed) {
-                let mut request = match rx.recv_timeout(Duration::from_millis(200)) {
-                    Ok(request) => request,
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(_) => break,
-                };
-                while let Ok(next) = rx.try_recv() {
-                    request = next;
-                }
-                if worker.cancelled(&request) {
+                let foreground = rx.try_recv().ok();
+                let mut request = if let Some(request) = foreground {
+                    let mut latest = request;
+                    while let Ok(next) = rx.try_recv() {
+                        latest = next;
+                    }
+                    if worker.generation.load(Ordering::Relaxed) != latest.generation {
+                        continue;
+                    }
+                    worker.foreground_waiting.store(false, Ordering::Relaxed);
+                    latest
+                } else if !worker.foreground_waiting.load(Ordering::Relaxed) {
+                    let next = worker
+                        .prefetch
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .pop_front();
+                    let Some(mut next) = next else {
+                        thread::sleep(Duration::from_millis(80));
+                        continue;
+                    };
+                    next.generation = worker.generation.load(Ordering::Relaxed);
+                    next
+                } else {
+                    thread::sleep(Duration::from_millis(40));
                     continue;
-                }
-                let result = worker.align(&request, &cache, &events);
-                if !worker.cancelled(&request) {
+                };
+                let result = if worker.cancelled(&request) {
+                    Ok(())
+                } else {
+                    worker.align(&request, &cache, &events)
+                };
+                if let Some(epoch) = request.prefetch_epoch {
+                    if worker.cancelled(&request) {
+                        if !worker.stopped.load(Ordering::Relaxed)
+                            && worker.prefetch_epoch.load(Ordering::Relaxed) == epoch
+                        {
+                            request.generation = worker.generation.load(Ordering::Relaxed);
+                            worker
+                                .prefetch
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push_front(request);
+                        }
+                    } else {
+                        let message = if result.is_ok() {
+                            format!("Подготовлено заранее: {}", request.track.title)
+                        } else {
+                            format!("Не удалось подготовить заранее: {}", request.track.title)
+                        };
+                        let _ = events.send(AssetEvent::PrefetchStatus { message });
+                    }
+                } else if !worker.cancelled(&request) {
                     if let Err(error) = &result {
                         report(&events, &request.key, &format!("Подготовка слов: {error}"));
                     }
@@ -84,6 +150,7 @@ impl AlignmentHandle {
         handle
     }
     pub fn invalidate(&self) -> u64 {
+        self.foreground_waiting.store(true, Ordering::Relaxed);
         self.generation.fetch_add(1, Ordering::Relaxed) + 1
     }
     pub fn stop(&self) {
@@ -99,11 +166,41 @@ impl AlignmentHandle {
             track,
             content,
             generation,
+            prefetch_epoch: None,
         });
+    }
+    pub fn begin_prefetch(&self) -> u64 {
+        let epoch = self.prefetch_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        self.prefetch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        epoch
+    }
+    pub fn prefetch(&self, track: Track, content: LyricsContent, epoch: u64) {
+        if self.prefetch_epoch.load(Ordering::Relaxed) != epoch
+            || self.stopped.load(Ordering::Relaxed)
+        {
+            return;
+        }
+        let mut queue = self.prefetch.lock().unwrap_or_else(|e| e.into_inner());
+        if queue.len() < 3 {
+            queue.push_back(Request {
+                key: format!("prefetch:{epoch}:{}", track.id),
+                track,
+                content,
+                generation: self.generation.load(Ordering::Relaxed),
+                prefetch_epoch: Some(epoch),
+            });
+        }
     }
     fn cancelled(&self, request: &Request) -> bool {
         self.stopped.load(Ordering::Relaxed)
             || self.generation.load(Ordering::Relaxed) != request.generation
+            || request.prefetch_epoch.is_some_and(|epoch| {
+                self.prefetch_epoch.load(Ordering::Relaxed) != epoch
+                    || self.foreground_waiting.load(Ordering::Relaxed)
+            })
     }
     fn align(
         &self,
@@ -118,7 +215,16 @@ impl AlignmentHandle {
             return Ok(());
         }
         fs::create_dir_all(cache)?;
+        let identity = crate::metadata::lyrics_query(&request.track);
         let fingerprint = serde_json::to_vec(&(
+            &identity.artist,
+            &identity.title,
+            &identity.album,
+            request.track.duration.round() as i64,
+            &request.content.lines,
+        ))?;
+        let path = cache.join(format!("{:x}.json", Sha256::digest(fingerprint)));
+        let legacy = serde_json::to_vec(&(
             &request.track.artist,
             &request.track.title,
             &request.track.album,
@@ -126,9 +232,9 @@ impl AlignmentHandle {
             &request.track.url,
             &request.content.lines,
         ))?;
-        let path = cache.join(format!("{:x}.json", Sha256::digest(fingerprint)));
+        let legacy_path = cache.join(format!("{:x}.json", Sha256::digest(legacy)));
         let mut content = request.content.clone();
-        if let Ok(bytes) = fs::read(&path) {
+        if let Ok(bytes) = fs::read(&path).or_else(|_| fs::read(&legacy_path)) {
             if bytes.len() <= 4 * 1024 * 1024 {
                 if let Ok(cached) = serde_json::from_slice::<Cached>(&bytes) {
                     if cached.lines.len() == content.lines.len() {
@@ -143,6 +249,9 @@ impl AlignmentHandle {
                             }
                         }
                         if cached.prepared && content.lines.iter().all(complete) {
+                            if !path.exists() {
+                                save(cache, &path, &content, true)?;
+                            }
                             publish(events, &request.key, &content);
                             report(events, &request.key, "По словам · полная разметка из кэша");
                             return Ok(());
@@ -191,9 +300,10 @@ impl AlignmentHandle {
             .arg(model_name)
             .arg("--models-dir")
             .arg(models)
-            .env("OMP_NUM_THREADS", "1")
-            .env("OPENBLAS_NUM_THREADS", "1")
-            .env("MKL_NUM_THREADS", "1")
+            .env("LYRICTTY_ALIGNMENT_THREADS", self.threads.to_string())
+            .env("OMP_NUM_THREADS", self.threads.to_string())
+            .env("OPENBLAS_NUM_THREADS", self.threads.to_string())
+            .env("MKL_NUM_THREADS", self.threads.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(fs::File::create(&log)?));
@@ -214,7 +324,11 @@ impl AlignmentHandle {
             }
             let _ = lines_tx.send(None);
         });
-        report(events, &request.key, "Подготавливаю аудио и тайминги слов…");
+        report(
+            events,
+            &request.key,
+            &format!("Подготавливаю аудио · {} потоков CPU", self.threads),
+        );
         let started = Instant::now();
         let mut output_closed = false;
         let mut prepared = false;
@@ -310,7 +424,11 @@ impl AlignmentHandle {
         report(
             events,
             &request.key,
-            &format!("Готово · {} слов по аудио", matched_words(&content)),
+            &format!(
+                "Готово · {} слов · {:.1} с",
+                matched_words(&content),
+                started.elapsed().as_secs_f64()
+            ),
         );
         Ok(())
     }

@@ -21,6 +21,7 @@ use zbus::{
 const PREFIX: &str = "org.mpris.MediaPlayer2.";
 const ROOT: &str = "org.mpris.MediaPlayer2";
 const PLAYER: &str = "org.mpris.MediaPlayer2.Player";
+const TRACK_LIST: &str = "org.mpris.MediaPlayer2.TrackList";
 const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 const PATH: &str = "/org/mpris/MediaPlayer2";
 const RESYNC_INTERVAL: Duration = Duration::from_secs(15);
@@ -466,6 +467,63 @@ impl PlaybackBackend for MprisBackend {
         result
     }
 
+    fn upcoming(&mut self, source_id: &str, limit: usize) -> Result<Vec<Track>> {
+        self.receive_events();
+        let limit = limit.min(3);
+        if limit == 0 || self.disconnected {
+            return Ok(vec![]);
+        }
+        let player = self
+            .players
+            .get(source_id)
+            .context("MPRIS source disconnected")?;
+        // HasTrackList is required by MPRIS. Browsers without it provide no
+        // discoverable queue; never infer one from their current URL/title.
+        let root = proxy(&self.connection, &player.owner, ROOT)?;
+        match root.get_property::<bool>("HasTrackList") {
+            Ok(true) => {}
+            Ok(false) => return Ok(vec![]),
+            Err(error) if missing_track_list(&error) => return Ok(vec![]),
+            Err(error) => return Err(error.into()),
+        }
+        let track_list = proxy(&self.connection, &player.owner, TRACK_LIST)?;
+        let ids: Vec<zbus::zvariant::OwnedObjectPath> = match track_list.get_property("Tracks") {
+            Ok(ids) => ids,
+            Err(error) if missing_track_list(&error) => return Ok(vec![]),
+            Err(error) => return Err(error.into()),
+        };
+        if boolean(&player.properties, "Shuffle") {
+            return Ok(vec![]);
+        }
+        let current = &player.snapshot.track.id;
+        if current.is_empty() || current == "/org/mpris/MediaPlayer2/TrackList/NoTrack" {
+            return Ok(vec![]);
+        }
+        let Some(position) = ids.iter().position(|id| id.as_str() == current) else {
+            return Ok(vec![]);
+        };
+        let next: Vec<_> = ids.into_iter().skip(position + 1).take(limit).collect();
+        if next.is_empty() {
+            return Ok(vec![]);
+        }
+        // Only the ID list is unbounded; request metadata for at most three.
+        let metadata: Vec<Properties> = match track_list.call("GetTracksMetadata", &(&next,)) {
+            Ok(metadata) => metadata,
+            Err(error) if missing_track_list(&error) => return Ok(vec![]),
+            Err(error) => return Err(error.into()),
+        };
+        // Match IDs rather than trusting reply ordering or stale queue entries.
+        Ok(next
+            .iter()
+            .filter_map(|id| {
+                metadata
+                    .iter()
+                    .map(metadata_track)
+                    .find(|track| track.id == id.as_str())
+            })
+            .collect())
+    }
+
     fn changed(&mut self) -> bool {
         self.receive_events();
         self.dirty
@@ -574,16 +632,9 @@ fn snapshot(
         .and_then(|v| v.try_clone().ok())
         .and_then(|v| Properties::try_from(v).ok())
         .unwrap_or_default();
-    let artist = metadata
-        .get("xesam:artist")
-        .and_then(|v| v.try_clone().ok())
-        .and_then(|v| Vec::<String>::try_from(v).ok())
-        .map(|artists| artists.join(", "))
-        .unwrap_or_else(|| string(&metadata, "xesam:artist").unwrap_or_default());
+    let track = metadata_track(&metadata);
+    let duration = track.duration;
     let control = boolean(properties, "CanControl");
-    let duration = integer(&metadata, "mpris:length")
-        .map(seconds)
-        .unwrap_or(0.0);
     PlaybackSnapshot {
         source_id: source_id.into(),
         source_name: string(root, "Identity").unwrap_or_else(|| {
@@ -592,19 +643,7 @@ fn snapshot(
                 .unwrap_or(source_id)
                 .to_owned()
         }),
-        track: Track {
-            id: metadata
-                .get("mpris:trackid")
-                .and_then(|v| <&ObjectPath<'_>>::try_from(v).ok())
-                .map(|path| path.as_str().to_owned())
-                .unwrap_or_default(),
-            title: string(&metadata, "xesam:title").unwrap_or_default(),
-            artist,
-            album: string(&metadata, "xesam:album").unwrap_or_default(),
-            artwork_url: string(&metadata, "mpris:artUrl"),
-            url: string(&metadata, "xesam:url"),
-            duration,
-        },
+        track,
         status: match string(properties, "PlaybackStatus").as_deref() {
             Some("Playing") => PlaybackStatus::Playing,
             Some("Paused") => PlaybackStatus::Paused,
@@ -628,6 +667,31 @@ fn snapshot(
             volume: control && number(properties, "Volume").is_some(),
         },
         updated_at: Instant::now(),
+    }
+}
+
+fn metadata_track(metadata: &Properties) -> Track {
+    let artist = metadata
+        .get("xesam:artist")
+        .and_then(|v| v.try_clone().ok())
+        .and_then(|v| Vec::<String>::try_from(v).ok())
+        .map(|artists| artists.join(", "))
+        .unwrap_or_else(|| string(metadata, "xesam:artist").unwrap_or_default());
+    let duration = integer(metadata, "mpris:length")
+        .map(seconds)
+        .unwrap_or(0.0);
+    Track {
+        id: metadata
+            .get("mpris:trackid")
+            .and_then(|v| <&ObjectPath<'_>>::try_from(v).ok())
+            .map(|path| path.as_str().to_owned())
+            .unwrap_or_default(),
+        title: string(metadata, "xesam:title").unwrap_or_default(),
+        artist,
+        album: string(metadata, "xesam:album").unwrap_or_default(),
+        artwork_url: string(metadata, "mpris:artUrl"),
+        url: string(metadata, "xesam:url"),
+        duration,
     }
 }
 
@@ -676,4 +740,13 @@ fn unsupported(error: &zbus::Error) -> bool {
             | "org.freedesktop.DBus.Error.NotSupported"
             | "org.mpris.MediaPlayer2.Player.Error.NotSupported"
     ))
+}
+
+fn missing_track_list(error: &zbus::Error) -> bool {
+    unsupported(error)
+        || matches!(error, zbus::Error::MethodError(name, _, _) if matches!(
+            name.as_str(),
+            "org.freedesktop.DBus.Error.UnknownInterface"
+                | "org.freedesktop.DBus.Error.UnknownProperty"
+        ))
 }

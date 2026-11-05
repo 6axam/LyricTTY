@@ -9,6 +9,9 @@ use std::{
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub audio_alignment: bool,
+    /// Zero selects all CPUs available to the process.
+    pub alignment_threads: u16,
+    pub prefetch_tracks: u8,
     pub prepare_before_playback: bool,
     pub fps: u16,
     pub pixel_lyrics: bool,
@@ -26,6 +29,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             audio_alignment: true,
+            alignment_threads: 0,
+            prefetch_tracks: 3,
             prepare_before_playback: false,
             fps: 60,
             pixel_lyrics: true,
@@ -50,6 +55,7 @@ impl Config {
         };
         let mut config: Self = toml::from_str(&text).context("Invalid LyricTTY configuration")?;
         config.fps = config.fps.clamp(10, 60);
+        config.prefetch_tracks = config.prefetch_tracks.min(3);
         config.instrumental_threshold_secs = config.instrumental_threshold_secs.clamp(4.0, 120.0);
         config.instrumental_fade_secs = config.instrumental_fade_secs.clamp(0.2, 5.0);
         Ok(config)

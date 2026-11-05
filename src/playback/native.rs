@@ -139,6 +139,75 @@ impl PlaybackBackend for NativeBackend {
         Ok(vec![snapshot])
     }
 
+    fn upcoming(&mut self, source_id: &str, limit: usize) -> Result<Vec<Track>> {
+        if source_id != SOURCE_ID {
+            bail!("unknown native source: {source_id}");
+        }
+        let limit = limit.min(3);
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        // Discovery never starts or replaces the owned mpv process.
+        let Some(session) = self.session.as_mut() else {
+            return Ok(vec![]);
+        };
+        let playlist = session.request(json!(["get_property", "playlist"]))?;
+        let position = session.request(json!(["get_property", "playlist-pos"]))?;
+        let Some(entries) = playlist.as_array() else {
+            return Ok(vec![]);
+        };
+        let Some(position) = position.as_u64().and_then(|pos| usize::try_from(pos).ok()) else {
+            return Ok(vec![]);
+        };
+        if position >= entries.len()
+            || entries
+                .iter()
+                .position(|entry| entry.get("current").and_then(Value::as_bool) == Some(true))
+                .is_some_and(|current| current != position)
+        {
+            // A transition between the two replies leaves no reliable anchor.
+            return Ok(vec![]);
+        }
+        // mpv's playlist is already in its actual (possibly shuffled) order.
+        // Do not wrap at the end, even when repeat is enabled.
+        Ok(entries[position + 1..]
+            .iter()
+            .filter(|entry| entry.get("current").and_then(Value::as_bool) != Some(true))
+            .filter_map(|entry| {
+                let url = entry.get("filename")?.as_str()?;
+                if url.trim().is_empty() || url.contains('\0') {
+                    return None;
+                }
+                let metadata = entry.get("metadata").unwrap_or(&Value::Null);
+                Some(Track {
+                    id: entry
+                        .get("id")
+                        .and_then(Value::as_u64)
+                        .map(|id| format!("native:playlist:{id}"))
+                        .unwrap_or_else(|| format!("native:playlist:{url}")),
+                    title: tag(entry, &["title"])
+                        .or_else(|| tag(metadata, &["title"]))
+                        .unwrap_or_default(),
+                    artist: tag(entry, &["artist"])
+                        .or_else(|| tag(metadata, &["artist"]))
+                        .unwrap_or_default(),
+                    album: tag(entry, &["album"])
+                        .or_else(|| tag(metadata, &["album"]))
+                        .unwrap_or_default(),
+                    url: Some(url.to_owned()),
+                    duration: entry
+                        .get("duration")
+                        .and_then(finite_number)
+                        .or_else(|| metadata.get("duration").and_then(finite_number))
+                        .unwrap_or(0.0)
+                        .max(0.0),
+                    ..Track::default()
+                })
+            })
+            .take(limit)
+            .collect())
+    }
+
     fn changed(&mut self) -> bool {
         self.session
             .as_ref()

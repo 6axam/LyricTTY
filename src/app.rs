@@ -71,6 +71,9 @@ pub struct App {
     url_input: String,
     status: String,
     alignment_status: Option<String>,
+    prefetch_status: Option<String>,
+    prefetch_key: String,
+    last_queue_poll: Option<Instant>,
     preparing_track: Option<String>,
     resume_after_preparation: bool,
     native_start_requested: bool,
@@ -122,6 +125,9 @@ impl App {
             url_input: String::new(),
             status: "Discovering music sources… · o open URL · s sources · ? help".into(),
             alignment_status: None,
+            prefetch_status: None,
+            prefetch_key: String::new(),
+            last_queue_poll: None,
             preparing_track: None,
             resume_after_preparation: false,
             native_start_requested: false,
@@ -295,6 +301,14 @@ impl App {
             })
             .unwrap_or_default();
         if key != self.track_key {
+            self.last_queue_poll = None;
+            if self.source().is_none() {
+                if let Some(worker) = &self.asset_request {
+                    worker.cancel();
+                }
+                self.prefetch_key.clear();
+                self.prefetch_status = None;
+            }
             if self.config.audio_alignment && self.config.prepare_before_playback && !self.demo {
                 if let Some(source) = self.source().filter(|s| !s.track.title.is_empty()) {
                     let identity = format!("{}:{}", source.source_id, source.track.id);
@@ -389,9 +403,68 @@ impl App {
         for event in events {
             match event {
                 Event::Sources(s) => self.update_sources(s),
+                Event::Upcoming {
+                    source_id,
+                    track_id,
+                    mut tracks,
+                } => {
+                    if self
+                        .source()
+                        .is_some_and(|s| s.source_id == source_id && s.track.id == track_id)
+                    {
+                        tracks.truncate(usize::from(self.config.prefetch_tracks));
+                        let signature = serde_json::to_string(&(
+                            source_id,
+                            tracks
+                                .iter()
+                                .map(|t| {
+                                    (
+                                        &t.id,
+                                        &t.url,
+                                        &t.title,
+                                        &t.artist,
+                                        &t.album,
+                                        t.duration.round() as i64,
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        ))
+                        .unwrap_or_default();
+                        if signature != self.prefetch_key {
+                            self.prefetch_key = signature;
+                            self.prefetch_status = Some(if tracks.is_empty() {
+                                "Нет доступных следующих треков".into()
+                            } else {
+                                format!("Предзагрузка {} следующих треков…", tracks.len())
+                            });
+                            if let Some(worker) = &self.asset_request {
+                                worker.prefetch(tracks);
+                            }
+                            self.dirty = true;
+                        }
+                    }
+                }
                 Event::Error(e) => {
                     self.status = e;
                     self.dirty = true;
+                }
+            }
+        }
+        if self.config.audio_alignment
+            && self.config.prefetch_tracks > 0
+            && !self.demo
+            && self
+                .last_queue_poll
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(10))
+        {
+            if let (Some(source), Some(service)) = (self.source(), &self.service) {
+                if !source.track.title.is_empty() {
+                    service.upcoming(
+                        &source.source_id,
+                        &source.track.id,
+                        usize::from(self.config.prefetch_tracks),
+                    );
+                    self.last_queue_poll = Some(Instant::now());
                 }
             }
         }
@@ -403,6 +476,10 @@ impl App {
         }
         for event in assets {
             match event {
+                lyrictty::assets::AssetEvent::PrefetchStatus { message } => {
+                    self.prefetch_status = Some(message);
+                    self.dirty = true;
+                }
                 lyrictty::assets::AssetEvent::AlignmentReady { key, prepared }
                     if key == self.asset_key =>
                 {
@@ -856,6 +933,20 @@ impl App {
         };
         let inner = block.inner(areas.lyrics);
         f.render_widget(block, areas.lyrics);
+        if let Some(message) = &self.prefetch_status {
+            if areas.lyrics.y >= a.y + 2 && !areas.lyrics.is_empty() {
+                f.render_widget(
+                    Paragraph::new(message.as_str())
+                        .style(Style::default().fg(theme::mix(p.muted, p.bg, 0.4))),
+                    Rect::new(
+                        areas.lyrics.x + 1,
+                        areas.lyrics.y - 2,
+                        areas.lyrics.width.saturating_sub(2),
+                        1,
+                    ),
+                );
+            }
+        }
         if let Some(message) = &self.alignment_status {
             if !areas.lyrics.is_empty() && areas.lyrics.y > a.y {
                 f.render_widget(

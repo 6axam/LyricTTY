@@ -2,8 +2,18 @@
 """CPU-only forced alignment of known lyrics; complete text coverage or failure."""
 import os
 
+try:
+    AVAILABLE_THREADS = len(os.sched_getaffinity(0))
+except (AttributeError, OSError):
+    AVAILABLE_THREADS = os.cpu_count() or 1
+try:
+    requested_threads = int(os.environ.get("LYRICTTY_ALIGNMENT_THREADS", "0"))
+except ValueError:
+    requested_threads = 0
+THREADS = AVAILABLE_THREADS if requested_threads <= 0 else min(requested_threads, AVAILABLE_THREADS)
+THREADS = max(1, THREADS)
 for _name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ[_name] = "1"
+    os.environ[_name] = str(THREADS)
 
 import argparse
 from contextlib import redirect_stdout
@@ -118,7 +128,7 @@ def dependencies():
             import stable_whisper
             import whisper
             import numpy as np
-            torch.set_num_threads(1)
+            torch.set_num_threads(THREADS)
             torch.set_num_interop_threads(1)
         return torch, stable_whisper, whisper, np
     except ImportError as error:
@@ -241,11 +251,6 @@ def main():
         os.nice(10)
     except OSError as error:
         diagnostic(f"could not lower scheduling priority: {error}")
-    if hasattr(os, "sched_getaffinity"):
-        try:
-            os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})
-        except OSError as error:
-            diagnostic(f"could not restrict CPU affinity: {error}")
     _, stable_whisper, whisper, np = dependencies()
     root = args.models_dir.expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)

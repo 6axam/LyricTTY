@@ -92,6 +92,10 @@ pub enum PlaybackCommand {
 pub trait PlaybackBackend: Send {
     fn refresh(&mut self) -> Result<Vec<PlaybackSnapshot>>;
     fn command(&mut self, source_id: &str, command: PlaybackCommand) -> Result<()>;
+    /// Discover actual subsequent queue entries without changing playback.
+    fn upcoming(&mut self, _source_id: &str, _limit: usize) -> Result<Vec<Track>> {
+        Ok(vec![])
+    }
     /// True after an observed backend event, not a network poll.
     fn changed(&mut self) -> bool;
 }

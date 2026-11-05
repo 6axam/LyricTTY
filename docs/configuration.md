@@ -4,6 +4,8 @@ Location: `$XDG_CONFIG_HOME/lyrictty/config.toml`, normally `~/.config/lyrictty/
 
 ```toml
 audio_alignment = true
+alignment_threads = 0
+prefetch_tracks = 3
 prepare_before_playback = false
 fps = 60
 pixel_lyrics = true
@@ -29,3 +31,7 @@ Native queue/source/position persistence is not yet implemented. The application
 `audio_alignment` aligns existing lyrics against a separately loaded audio file with stable-ts `align_words()` and the multilingual Whisper base model. Install once using `scripts/setup-alignment.sh base`; `ru`/`en` remain aliases for the same multilingual setup. Runtime/models live under `$XDG_DATA_HOME/lyrictty/alignment`, with the checkpoint at `models/stable-ts/base.pt`. A fully prepared cache starts no model. Temporary decoded audio is deleted after analysis; nothing is uploaded or recorded from the microphone.
 
 `prepare_before_playback = false` is the default: music continues while alignment runs independently. Complete lines are displayed as they become ready. The full cache is marked prepared only with 100% original lexical-word coverage and exact text reconstruction; timing accuracy is not guaranteed. Failed lines are retried, and unresolved words produce a visible error instead of fabricated timings. Explicit point cues for short particles are supported separately from words with missing timing; no uniform duration is manufactured. Explicitly set `prepare_before_playback = true` to pause until preparation; Space overrides waiting and failure releases playback. Source audio requires `yt-dlp`, `ffmpeg`, and `ffprobe` for public URLs; fallback search validates recording identity and duration.
+
+`alignment_threads = 0` uses all CPUs available to the process for a burst of alignment work. Positive values cap the thread budget; the process stays at low scheduling priority. Torch intra-operation threads share this budget, while inter-operation parallelism stays at one to avoid nested oversubscription. No single-core affinity restriction remains.
+
+`prefetch_tracks` is clamped to 0–3 (default 3, 0 disables it). Queue metadata and lyric fetching happen off the playback/UI workers; heavy alignment remains sequential and gives active-song requests priority. Queue changes cancel obsolete speculative work. Completed timeline caches are shared with subsequent active playback. Discovery requires an actual native playlist or an MPRIS TrackList (and predictable order); unavailable browser queues are not inferred. Online lyrics must be enabled for automatic future-track lyric lookup.

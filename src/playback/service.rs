@@ -1,4 +1,4 @@
-use super::{PlaybackBackend, PlaybackCommand, PlaybackSnapshot};
+use super::{PlaybackBackend, PlaybackCommand, PlaybackSnapshot, Track};
 use std::{
     sync::mpsc::{self, Receiver, Sender},
     thread::{self, JoinHandle},
@@ -6,6 +6,11 @@ use std::{
 };
 
 pub enum Request {
+    Upcoming {
+        source_id: String,
+        track_id: String,
+        limit: usize,
+    },
     Command {
         source_id: String,
         command: PlaybackCommand,
@@ -13,6 +18,11 @@ pub enum Request {
     Shutdown,
 }
 pub enum Event {
+    Upcoming {
+        source_id: String,
+        track_id: String,
+        tracks: Vec<Track>,
+    },
     Sources(Vec<PlaybackSnapshot>),
     Error(String),
 }
@@ -70,6 +80,24 @@ impl PlaybackService {
                 first = false;
                 force = false;
                 match rx.recv_timeout(Duration::from_millis(80)) {
+                    Ok(Request::Upcoming {
+                        source_id,
+                        track_id,
+                        limit,
+                    }) => {
+                        let tracks = snapshots
+                            .iter()
+                            .position(|sources| sources.iter().any(|s| s.source_id == source_id))
+                            .and_then(|index| {
+                                backends[index].upcoming(&source_id, limit.min(3)).ok()
+                            })
+                            .unwrap_or_default();
+                        let _ = tx.send(Event::Upcoming {
+                            source_id,
+                            track_id,
+                            tracks,
+                        });
+                    }
                     Ok(Request::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Ok(Request::Command { source_id, command }) => {
@@ -100,6 +128,13 @@ impl PlaybackService {
         let _ = self.requests.send(Request::Command {
             source_id: source_id.into(),
             command,
+        });
+    }
+    pub fn upcoming(&self, source_id: &str, track_id: &str, limit: usize) {
+        let _ = self.requests.send(Request::Upcoming {
+            source_id: source_id.into(),
+            track_id: track_id.into(),
+            limit: limit.min(3),
         });
     }
 }
