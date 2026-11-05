@@ -394,7 +394,7 @@ fn line_style(
     opacity: u8,
     words: &[WordBox],
 ) -> Vec<u8> {
-    let mut style = vec![opacity];
+    let mut style = vec![opacity, u8::from(position >= line.end)];
     for c in [palette.fg, palette.muted, palette.accent] {
         style.extend(rgb(c));
     }
@@ -405,7 +405,7 @@ fn line_style(
             .map(|r| r.width)
             .sum::<f32>();
         let progress = progress(w.start, w.end, position);
-        style.extend_from_slice(&((progress * width).floor() as u32).to_le_bytes());
+        style.extend_from_slice(&((progress * width * 4.0).floor() as u32).to_le_bytes());
         style.push(u8::from(position >= w.end));
     }
     style
@@ -432,12 +432,17 @@ fn paint_line(
         let mut boundary = None;
         if let Some(wi) = glyph.word {
             let w = &lyric.words[wi];
-            if position < w.end {
+            if position >= w.end && position < lyric.end {
+                color = rgb(palette.accent);
+            } else if position < w.end {
                 color = rgb(palette.muted);
                 if position >= w.start {
                     let regions: Vec<_> = line.words.iter().filter(|r| r.index == wi).collect();
-                    let mut fill = progress(w.start, w.end, position)
-                        * regions.iter().map(|r| r.width).sum::<f32>();
+                    let mut fill = (progress(w.start, w.end, position)
+                        * regions.iter().map(|r| r.width).sum::<f32>()
+                        * 4.0)
+                        .floor()
+                        / 4.0;
                     for region in regions {
                         if glyph.row_y >= region.y && glyph.row_y < region.y + region.height {
                             boundary = Some(region.x + fill.min(region.width));
@@ -462,11 +467,11 @@ fn paint_line(
                 if alpha == 0 {
                     continue;
                 }
-                let color = if let Some(edge) = boundary.filter(|edge| (x as f32) < *edge) {
+                let color = if let Some(edge) = boundary {
                     rgb(crate::theme::mix(
+                        palette.muted,
                         palette.accent,
-                        palette.fg,
-                        ((edge - x as f32) / 4.0).clamp(0.0, 1.0),
+                        (edge - x as f32).clamp(0.0, 1.0),
                     ))
                 } else {
                     color

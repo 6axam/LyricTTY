@@ -196,25 +196,38 @@ fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) ->
         push(&line.text, palette.fg, None);
     } else {
         for (wi, word) in line.words.iter().enumerate() {
-            let count = word.text.graphemes(true).count().max(1);
+            let count = word
+                .text
+                .graphemes(true)
+                .map(|g| g.width())
+                .sum::<usize>()
+                .max(1);
             let progress = if word.end > word.start {
                 ((position - word.start) / (word.end - word.start)).clamp(0.0, 1.0)
             } else {
                 0.0
             };
-            for (gi, g) in word.text.graphemes(true).enumerate() {
+            let mut filled_width = 0;
+            for g in word.text.graphemes(true) {
+                let size = g.width().max(1);
                 let color = if position >= word.end {
-                    palette.fg
+                    if position < line.end {
+                        palette.accent
+                    } else {
+                        palette.fg
+                    }
                 } else if Some(wi) == active {
                     mix(
                         palette.muted,
                         palette.accent,
-                        (progress * count as f32 - gi as f32).clamp(0.0, 1.0),
+                        ((progress * count as f32 - filled_width as f32) / size as f32)
+                            .clamp(0.0, 1.0),
                     )
                 } else {
                     palette.muted
                 };
                 push(g, color, Some(word.start));
+                filled_width += size;
             }
         }
     }
