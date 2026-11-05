@@ -149,7 +149,7 @@ impl PixelLyrics {
         self.content = content.to_vec();
         self.width = width;
         self.karaoke = karaoke;
-        let px = (self.cell.1 as f32 * if karaoke { 1.55 } else { 1.18 }).clamp(18.0, 54.0);
+        let px = (self.cell.1 as f32 * if karaoke { 2.15 } else { 1.95 }).clamp(26.0, 60.0);
         if px != self.font_px {
             self.font_px = px;
             self.glyphs.clear();

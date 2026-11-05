@@ -20,7 +20,7 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol, Resize, StatefulImage};
@@ -328,16 +328,34 @@ impl App {
                     self.artwork = Some(artwork);
                     self.cover_protocol = self.picker.as_ref().and_then(|picker| {
                         self.artwork.as_ref().map(|art| {
-                            let size = art.image.width().min(art.image.height());
-                            let square = image::imageops::crop_imm(
+                            let width = art
+                                .image
+                                .width()
+                                .min(art.image.height().saturating_mul(8) / 5)
+                                .max(1);
+                            let height = art.image.height().min(width.saturating_mul(5) / 8).max(1);
+                            let cropped = image::imageops::crop_imm(
                                 &art.image,
-                                (art.image.width() - size) / 2,
-                                (art.image.height() - size) / 2,
-                                size,
-                                size,
+                                (art.image.width() - width) / 2,
+                                (art.image.height() - height) / 2,
+                                width,
+                                height,
                             )
                             .to_image();
-                            picker.new_resize_protocol(image::DynamicImage::ImageRgb8(square))
+                            let mut cover = image::DynamicImage::ImageRgb8(cropped).into_rgba8();
+                            let radius = (height as f32 * 0.045).max(1.0);
+                            for (x, y, pixel) in cover.enumerate_pixels_mut() {
+                                let dx = (radius
+                                    - (x as f32 + 0.5).min(width as f32 - x as f32 - 0.5))
+                                .max(0.0);
+                                let dy = (radius
+                                    - (y as f32 + 0.5).min(height as f32 - y as f32 - 0.5))
+                                .max(0.0);
+                                pixel.0[3] = ((radius + 0.5 - (dx * dx + dy * dy).sqrt())
+                                    .clamp(0.0, 1.0)
+                                    * 255.0) as u8;
+                            }
+                            picker.new_resize_protocol(image::DynamicImage::ImageRgba8(cover))
                         })
                     });
                     self.dirty = true;
@@ -645,9 +663,13 @@ impl App {
             .map(|s| s.source_name.as_str())
             .unwrap_or("No source");
         if !self.karaoke && tier_for(a) != Tier::Compact {
-            let panel_y = areas.metadata.bottom().saturating_sub(3);
+            let panel_y = areas.metadata.bottom().saturating_sub(4);
             f.render_widget(
-                Block::default().style(Style::default().bg(p.panel)),
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(theme::mix(p.panel, p.muted, 0.25)))
+                    .style(Style::default().bg(p.panel)),
                 Rect::new(
                     areas.metadata.x,
                     panel_y,
@@ -883,10 +905,12 @@ impl App {
         let mut y = a.y;
         if self.config.show_artwork {
             let width = a.width;
-            let height = a.height.saturating_sub(4);
+            let height = a.height.saturating_sub(5);
             let rect = Rect::new(a.x, y, width, height);
             self.draw_artwork(f, rect);
-            y = y.saturating_add(height + 1);
+            y = y.saturating_add(height + 2);
+        } else {
+            y = a.bottom().saturating_sub(3);
         }
         if y >= a.bottom() {
             return;
@@ -1070,8 +1094,22 @@ fn draw_cover(f: &mut Frame, a: Rect, art: &Artwork) {
     if a.is_empty() {
         return;
     }
-    let im = image::imageops::resize(
+    let width = art
+        .image
+        .width()
+        .min(art.image.height().saturating_mul(8) / 5)
+        .max(1);
+    let height = art.image.height().min(width.saturating_mul(5) / 8).max(1);
+    let crop = image::imageops::crop_imm(
         &art.image,
+        (art.image.width() - width) / 2,
+        (art.image.height() - height) / 2,
+        width,
+        height,
+    )
+    .to_image();
+    let im = image::imageops::resize(
+        &crop,
         a.width as u32,
         a.height as u32 * 2,
         image::imageops::FilterType::Triangle,
