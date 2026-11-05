@@ -8,6 +8,7 @@ use std::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub audio_alignment: bool,
     pub fps: u16,
     pub pixel_lyrics: bool,
     pub scroll_duration_ms: u32,
@@ -23,6 +24,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            audio_alignment: true,
             fps: 60,
             pixel_lyrics: true,
             scroll_duration_ms: 850,

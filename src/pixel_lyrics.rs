@@ -328,6 +328,9 @@ impl PixelLyrics {
             write!(self.pending,"\x1b[{};{}H\x1b_Ga=p,i={id},p=1,x=0,y={crop_y},w={width},h={height},X={},Y={},C=1,z=2,q=2\x1b\\",y/u32::from(self.cell.1)+1,x/u32::from(self.cell.0)+1,x%u32::from(self.cell.0),y%u32::from(self.cell.1))?;
             line.visible = true;
             for word in &line.words {
+                if lyric.words[word.index].end <= lyric.words[word.index].start {
+                    continue;
+                }
                 let region = pixel_hit(
                     area,
                     self.cell,
@@ -398,17 +401,6 @@ fn line_style(
     for c in [palette.fg, palette.muted, palette.accent] {
         style.extend(rgb(c));
     }
-    if line.words.is_empty() {
-        let width = raster
-            .glyphs
-            .iter()
-            .map(|g| g.glyph.metrics.advance_width)
-            .sum::<f32>();
-        style.extend_from_slice(
-            &((progress(line.start, line.end, position) * width * 4.0).floor() as u32)
-                .to_le_bytes(),
-        );
-    }
     for (i, w) in line.words.iter().enumerate() {
         let width = raster
             .words
@@ -439,30 +431,15 @@ fn paint_line(
 ) -> Result<Vec<u8>> {
     let fill_color = crate::theme::lyric_fill(palette);
     let mut pixels = vec![0u8; width as usize * line.height as usize * 4];
-    // Line-only sources have no word cues: approximate the sweep visually,
-    // without manufacturing or caching word timestamps.
-    let line_fill = progress(lyric.start, lyric.end, position)
-        * line
-            .glyphs
-            .iter()
-            .map(|g| g.glyph.metrics.advance_width)
-            .sum::<f32>();
-    let mut line_consumed = 0.0;
     for glyph in &line.glyphs {
         let g = &glyph.glyph;
         let mut color = rgb(palette.fg);
         let mut boundary = None;
-        if lyric.words.is_empty() && position >= lyric.start && position < lyric.end {
-            color = rgb(palette.muted);
-            boundary = Some(
-                glyph.x as f32 - g.metrics.xmin as f32
-                    + (line_fill - line_consumed).clamp(0.0, g.metrics.advance_width),
-            );
-        }
-        line_consumed += g.metrics.advance_width;
         if let Some(wi) = glyph.word {
             let w = &lyric.words[wi];
-            if position >= w.end && position < lyric.end {
+            if w.end <= w.start {
+                color = rgb(palette.muted);
+            } else if position >= w.end && position < lyric.end {
                 color = rgb(fill_color);
             } else if position < w.end {
                 color = rgb(palette.muted);

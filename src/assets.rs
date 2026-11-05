@@ -1,4 +1,5 @@
 use crate::{
+    alignment::AlignmentHandle,
     artwork::{Artwork, ArtworkProvider},
     config::Config,
     content::LyricsContent,
@@ -11,16 +12,19 @@ use std::{
     thread,
 };
 pub enum AssetEvent {
+    AlignmentStatus { key: String, message: String },
     Lyrics { key: String, content: LyricsContent },
     Artwork { key: String, artwork: Artwork },
 }
 struct Request {
+    generation: u64,
     key: String,
     track: Track,
     local: Option<PathBuf>,
     demo: bool,
 }
 pub struct AssetService {
+    alignment: AlignmentHandle,
     requests: Sender<Request>,
     pub events: Receiver<AssetEvent>,
 }
@@ -28,6 +32,8 @@ impl AssetService {
     pub fn start(config: Config, cache: PathBuf) -> Self {
         let (requests, rx) = mpsc::channel::<Request>();
         let (tx, events) = mpsc::channel();
+        let alignment = AlignmentHandle::start(cache.join("audio-words-v1"), tx.clone());
+        let align_worker = alignment.clone();
         // Dedicated workers let a slow lyrics server coexist with a fast cover.
         let (art_tx, art_rx) = mpsc::channel::<(String, String)>();
         let cover_tx = tx.clone();
@@ -113,25 +119,42 @@ impl AssetService {
                         ..Default::default()
                     },
                 };
+                let align_content = content.clone();
                 if tx
                     .send(AssetEvent::Lyrics {
-                        key: r.key,
+                        key: r.key.clone(),
                         content,
                     })
                     .is_err()
                 {
                     break;
                 }
+                if config.audio_alignment && !r.demo {
+                    align_worker.request(r.key, r.track, align_content, r.generation);
+                }
             }
         });
-        Self { requests, events }
+        Self {
+            requests,
+            events,
+            alignment,
+        }
     }
     pub fn request(&self, key: String, track: Track, local: Option<PathBuf>, demo: bool) {
         let _ = self.requests.send(Request {
+            generation: self.alignment.invalidate(),
             key,
             track,
             local,
             demo,
         });
+    }
+    pub fn playback(&self, key: &str, source: Option<&crate::playback::PlaybackSnapshot>) {
+        self.alignment.playback(key, source);
+    }
+}
+impl Drop for AssetService {
+    fn drop(&mut self) {
+        self.alignment.stop();
     }
 }

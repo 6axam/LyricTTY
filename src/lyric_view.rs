@@ -194,32 +194,7 @@ fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) ->
         }
     };
     if line.words.is_empty() {
-        let total = line
-            .text
-            .graphemes(true)
-            .map(|g| g.width())
-            .sum::<usize>()
-            .max(1);
-        let progress = if line.end > line.start {
-            ((position - line.start) / (line.end - line.start)).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let mut consumed = 0;
-        for g in line.text.graphemes(true) {
-            let size = g.width().max(1);
-            let color = if position >= line.start && position < line.end {
-                mix(
-                    palette.muted,
-                    fill_color,
-                    ((progress * total as f32 - consumed as f32) / size as f32).clamp(0.0, 1.0),
-                )
-            } else {
-                palette.fg
-            };
-            push(g, color, None);
-            consumed += g.width();
-        }
+        push(&line.text, palette.fg, None);
     } else {
         for (wi, word) in line.words.iter().enumerate() {
             let count = word
@@ -236,7 +211,9 @@ fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) ->
             let mut filled_width = 0;
             for g in word.text.graphemes(true) {
                 let size = g.width().max(1);
-                let color = if position >= word.end {
+                let color = if word.end <= word.start {
+                    palette.muted
+                } else if position >= word.end {
                     if position < line.end {
                         fill_color
                     } else {
@@ -252,7 +229,7 @@ fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) ->
                 } else {
                     palette.muted
                 };
-                push(g, color, Some(word.start));
+                push(g, color, (word.end > word.start).then_some(word.start));
                 filled_width += size;
             }
         }

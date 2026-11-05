@@ -19,6 +19,7 @@ Spotify-like synced lyrics and adaptive music UI for your terminal.
 - Source Auto chooses the only playing source; simultaneous playback opens a selector.
 - Local enhanced LRC and Lyricsfile JSON/YAML; online **LRCLIB** with word → line → plain → no-lyrics fallback and disk caching.
 - Actual word timestamps drive completed/current/future word colors and partial word progress. Ordinary LRC is never given invented word timing.
+- Optional local audio recognition learns missing word timings from playback and caches matched words for future listens.
 - Pixel-smooth lyrics in Kitty: cached text images move at sub-cell offsets with larger typography and no doubled rows. Other terminals keep eased row blending. Both paths retain line/word seek.
 - Mouse seeking, manual lyric browsing, return to LIVE, and a minimal karaoke layout.
 - Cached artwork, dominant-color dark themes with contrast checks, smooth theme transitions, and Kitty Graphics (truecolor halfblocks elsewhere).
@@ -84,6 +85,17 @@ lyrictty --demo
 
 The included [authored timing fixture](examples/demo.lrc) has real explicit word cues, Cyrillic, and an instrumental gap. It is deliberately silent and labeled as a demo. For music, pass your own timestamped file with `--lyrics` alongside a native URL or active browser source. LRCLIB word timing is used only when the server supplies a valid Lyricsfile; most records remain line-synced.
 
+### Learn word timings from playback
+
+```bash
+./scripts/setup-alignment.sh ru  # Small Russian Vosk model; use en for English
+lyrictty
+```
+
+Requires `parec` and `pactl` (PulseAudio tools, also available with PipeWire's PulseAudio compatibility). The recognizer listens only to the default playback sink's monitor, never the microphone. Audio stays local and is not saved. It matches recognized words against the supplied lyrics; unrecognized words remain unfilled rather than receiving uniform estimated timings.
+
+The first listen learns words with recognition delay; later listens reuse saved acoustic timestamps. Singing, loud accompaniment and incorrect line timestamps can reduce matches. This is confidence-filtered speech recognition, not guaranteed forced alignment. Small Russian/English models download about 45/40 MB and typically need around 300 MB RAM while loaded. Recognition runs at low priority on one CPU, with throttling and no GPU. Pausing stops capture and inference. Fully timed songs use their existing cues and do not start the recognizer. Disable with `audio_alignment = false` and restart.
+
 [Kitty pixel scrolling — actual 60 FPS recording](assets/smooth-lyrics.mp4)
 
 Portable terminal fallback preview:
@@ -105,7 +117,7 @@ See [all settings](docs/configuration.md), [architecture](docs/architecture.md),
 - yt-dlp/YouTube availability and extraction speed vary. Update yt-dlp through your package manager when extraction fails.
 - Lyrics availability and community timing quality vary. Displayed video titles are conservatively normalized for catalog lookup; Live/Remix qualifiers are preserved.
 - Outside Kitty's pixel renderer, terminal glyphs occupy whole cells. The ANSI fallback blends adjacent rows and may have a soft doubled edge. In Kitty, set FPS to 60 and enable Pixel lyrics in `,` for the smoothest available mode.
-- Instrumental detection uses explicit cue gaps or a conservative estimate after line starts. The ambient bars are **not** audio FFT. PipeWire/CAVA capture is future work.
+- Instrumental detection uses explicit cue gaps or a conservative estimate after line starts. The ambient bars are **not** audio FFT; playback capture is used for word recognition only.
 - Karaoke minimizes the interface; Kitty pixel lyrics also use larger type. The terminal fallback uses the terminal's font size.
 - A session D-Bus restart requires restarting LyricTTY. Individual player disappearance/replacement is handled live.
 - Session/queue persistence, a queue editor, catalog search and account/library features remain outside this development milestone.

@@ -70,6 +70,7 @@ pub struct App {
     selection: usize,
     url_input: String,
     status: String,
+    alignment_status: Option<String>,
     karaoke: bool,
     last: Instant,
     started: Instant,
@@ -116,6 +117,7 @@ impl App {
             selection: 0,
             url_input: String::new(),
             status: "Discovering music sources… · o open URL · s sources · ? help".into(),
+            alignment_status: None,
             karaoke: false,
             last: Instant::now(),
             started: Instant::now(),
@@ -283,6 +285,7 @@ impl App {
             })
             .unwrap_or_default();
         if asset_key != self.asset_key {
+            self.alignment_status = None;
             self.asset_key = asset_key.clone();
             if let Some(s) = self.source() {
                 if !s.track.title.is_empty() {
@@ -308,6 +311,9 @@ impl App {
         }
     }
     pub fn tick(&mut self) {
+        if let Some(worker) = &self.asset_request {
+            worker.playback(&self.asset_key, self.source());
+        }
         let dt = self.last.elapsed().as_secs_f32();
         self.last = Instant::now();
         let mut events = Vec::new();
@@ -333,6 +339,12 @@ impl App {
         }
         for event in assets {
             match event {
+                lyrictty::assets::AssetEvent::AlignmentStatus { key, message }
+                    if key == self.asset_key =>
+                {
+                    self.alignment_status = Some(message);
+                    self.dirty = true;
+                }
                 lyrictty::assets::AssetEvent::Lyrics { key, content } if key == self.asset_key => {
                     self.status = format!("{} · s sources · o open · ? help", content.quality);
                     self.content = content;
@@ -676,6 +688,7 @@ impl App {
             .unwrap_or((8, 16));
         let areas = layout::areas_with_cell(a, self.karaoke, cell);
         self.lyric_rect = areas.lyrics;
+        // A small state label distinguishes listening from cached acoustic cues.
         self.progress_rect = areas.progress;
         self.controls_rect = areas.controls;
         f.render_widget(
@@ -761,6 +774,20 @@ impl App {
         };
         let inner = block.inner(areas.lyrics);
         f.render_widget(block, areas.lyrics);
+        if let Some(message) = &self.alignment_status {
+            if !areas.lyrics.is_empty() && areas.lyrics.y > a.y {
+                f.render_widget(
+                    Paragraph::new(message.as_str())
+                        .style(Style::default().fg(theme::mix(p.muted, p.bg, 0.25))),
+                    Rect::new(
+                        areas.lyrics.x + 1,
+                        areas.lyrics.y - 1,
+                        areas.lyrics.width.saturating_sub(2),
+                        1,
+                    ),
+                );
+            }
+        }
         if self.content.lines.is_empty() {
             let message = if !self.content.plain.is_empty() {
                 self.content.plain.clone()
@@ -1263,7 +1290,7 @@ fn fmt(s: f32) -> String {
 }
 pub fn doctor() -> Result<()> {
     println!("LyricTTY doctor (development)");
-    for name in ["mpv", "yt-dlp"] {
+    for name in ["mpv", "yt-dlp", "pactl", "parec"] {
         let ok = Command::new(name)
             .arg("--version")
             .output()
@@ -1293,10 +1320,9 @@ pub fn doctor() -> Result<()> {
         }
     );
     println!(
-        "{} PipeWire (ambient fallback; no capture backend)",
-        if Command::new("pw-cli")
-            .arg("info")
-            .arg("0")
+        "{} Playback-output monitor (word recognition)",
+        if Command::new("pactl")
+            .arg("get-default-sink")
             .output()
             .is_ok_and(|o| o.status.success())
         {
@@ -1305,6 +1331,25 @@ pub fn doctor() -> Result<()> {
             "!"
         }
     );
+    let root = dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("lyrictty/alignment");
+    for model in ["vosk-model-small-ru-0.22", "vosk-model-small-en-us-0.15"] {
+        println!(
+            "{} Audio words: {model}",
+            if root
+                .join("models")
+                .join(model)
+                .join("am/final.mdl")
+                .exists()
+                && root.join("venv/bin/python").exists()
+            {
+                "✓"
+            } else {
+                "!"
+            }
+        );
+    }
     println!("✓ Lyrics: local enhanced LRC / Lyricsfile + LRCLIB\n! YouTube Music account integration unavailable; public URLs use yt-dlp\n✓ No account required");
     Ok(())
 }
