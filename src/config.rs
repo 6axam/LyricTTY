@@ -9,6 +9,7 @@ use std::{
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub audio_alignment: bool,
+    pub prepare_before_playback: bool,
     pub fps: u16,
     pub pixel_lyrics: bool,
     pub scroll_duration_ms: u32,
@@ -25,6 +26,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             audio_alignment: true,
+            prepare_before_playback: true,
             fps: 60,
             pixel_lyrics: true,
             scroll_duration_ms: 850,

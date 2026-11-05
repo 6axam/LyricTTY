@@ -21,6 +21,7 @@ import tempfile
 import time
 import urllib.request
 import zipfile
+import wave
 
 
 MODELS = {
@@ -419,15 +420,85 @@ class Aligner:
             self.selector.close()
 
 
+def run_offline(request, lines, model_path, model_class, recognizer_class):
+    from prepare_audio import prepare_audio, status
+
+    # Include model construction in the CPU budget; sleep repays any CPU bursts.
+    cpu_origin, wall_origin = time.process_time(), time.monotonic()
+
+    def throttle():
+        delay = (time.process_time() - cpu_origin) / 0.4 - (time.monotonic() - wall_origin)
+        while delay > 0:
+            time.sleep(min(delay, 0.25))
+            delay = (time.process_time() - cpu_origin) / 0.4 - (time.monotonic() - wall_origin)
+
+    parent = request.get("work_dir")
+    if parent is not None:
+        if not isinstance(parent, str) or not Path(parent).is_dir():
+            raise ValueError("work_dir must name an existing temporary directory")
+    # Always own a child directory, even when Rust supplies the parent workdir.
+    with tempfile.TemporaryDirectory(prefix="alignment-audio-", dir=parent) as temporary:
+        audio_path = prepare_audio(request.get("track"), Path(temporary))
+        cpu_origin, wall_origin = time.process_time(), time.monotonic()
+        with wave.open(str(audio_path), "rb") as audio:
+            duration = audio.getnframes() / 16000
+            # LRC's final display window can extend past the audio's end.
+            # Clip the sample slice, preserving the provider's timeline/cache key.
+            if any(line.start < 0 or line.start >= duration for line in lines):
+                raise ValueError("lyric intervals extend outside the prepared audio")
+            status("loading_model")
+            model = model_class(str(model_path))
+            throttle()
+            status("aligning_lyrics")
+            for index, line in enumerate(lines):
+                if not line.accurate and line.tokens and line.end > line.start:
+                    grammar = [" ".join(line.expected[start:])
+                               for start in range(min(len(line.expected), 80))] + ["[unk]"]
+                    recognizer = recognizer_class(
+                        model, 16000, json.dumps(grammar, ensure_ascii=False))
+                    recognizer.SetWords(True)
+                    line.cursor = 0
+                    line.partial = {}
+                    # Sample zero describes line.start; measured results are
+                    # clipped by Line.accept, never interpolated across silence.
+                    first = int(line.start * 16000)
+                    last = min(audio.getnframes(), math.ceil(line.end * 16000))
+                    audio.setpos(first)
+                    remaining = last - first
+                    throttle()
+                    while remaining > 0:
+                        chunk = audio.readframes(min(3200, remaining))
+                        if not chunk:
+                            raise ValueError("unexpected end of prepared WAV")
+                        remaining -= len(chunk) // 2
+                        if recognizer.AcceptWaveform(chunk):
+                            # Consume every endpoint: FinalResult alone loses
+                            # phrases preceding an internal silence endpoint.
+                            result = json.loads(recognizer.Result())
+                            line.accept(result.get("result", []), line.start, 1, True)
+                        throttle()
+                    result = json.loads(recognizer.FinalResult())
+                    line.accept(result.get("result", []), line.start, 1, True)
+                    line.accurate = len(line.committed) == len(line.tokens)
+                    del recognizer
+                    throttle()
+                line.emit(index)
+            print(json.dumps({"prepared": True,
+                              "matched": sum(len(line.committed) for line in lines),
+                              "total": sum(len(line.tokens) for line in lines)}), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--offline", action="store_true",
+                        help="prepare exact track audio and align before playback")
     parser.add_argument("--request", type=Path)
     parser.add_argument("--model", type=Path)
     parser.add_argument("--download-model", choices=MODELS)
     parser.add_argument("--models-dir", type=Path)
     args = parser.parse_args()
     if args.download_model:
-        if args.models_dir is None or args.request or args.model:
+        if args.models_dir is None or args.request or args.model or args.offline:
             parser.error("download mode requires --models-dir and no runtime arguments")
         download_model(args.download_model, args.models_dir)
         return
@@ -438,7 +509,7 @@ def main():
     with args.request.open(encoding="utf-8") as source:
         request = json.load(source)
     lines = [Line(item) for item in request["lines"]]
-    playback = Playback(request)
+    playback = None if args.offline else Playback(request)
     try:
         os.nice(10)
         if hasattr(os, "sched_getaffinity"):
@@ -450,16 +521,19 @@ def main():
     except ImportError as error:
         raise RuntimeError("Vosk unavailable; run scripts/setup-alignment.sh ru (or en)") from error
     SetLogLevel(-1)
-    diagnostic("Listening only to the default sink monitor; no audio is saved. "
-               "Small Vosk models use roughly 300 MB at runtime; singing recognition is limited.")
-    model = Model(str(args.model))
-    aligner = Aligner(lines, playback, model, KaldiRecognizer)
-
     def terminate(_signum, _frame):
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
+    if args.offline:
+        run_offline(request, lines, args.model, Model, KaldiRecognizer)
+        return
+    diagnostic("Listening only to the default sink monitor; no audio is saved. "
+               "Small Vosk models use roughly 300 MB at runtime; singing recognition is limited.")
+    model = Model(str(args.model))
+    aligner = Aligner(lines, playback, model, KaldiRecognizer)
+
     aligner.run()
 
 

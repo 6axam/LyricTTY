@@ -158,10 +158,12 @@ impl PixelLyrics {
         let mut offset = 0.0;
         for line in content {
             let mut glyphs = Vec::new();
-            let mut words = Vec::new();
+            let mut words: Vec<WordBox> = Vec::new();
             let mut row_widths = Vec::new();
             let mut x = 0.0f32;
             let mut y = 0.0f32;
+            // Group by visible words, independently of timing/syllable pieces.
+            let mut units: Vec<Vec<(char, Option<usize>)>> = vec![Vec::new()];
             let parts: Vec<_> = if line.words.is_empty() {
                 vec![(line.text.as_str(), None)]
             } else {
@@ -172,45 +174,41 @@ impl PixelLyrics {
                     .collect()
             };
             for (text, word) in parts {
-                let word_width: f32 = text
-                    .chars()
-                    .map(|c| self.glyph(c).metrics.advance_width)
+                for c in text.chars().filter(|c| *c != '\r') {
+                    units.last_mut().unwrap().push((c, word));
+                    if c.is_whitespace() {
+                        units.push(Vec::new());
+                    }
+                }
+            }
+            for unit in units {
+                let word_width: f32 = unit
+                    .iter()
+                    .filter(|(c, _)| !c.is_whitespace())
+                    .map(|(c, _)| self.glyph(*c).metrics.advance_width)
                     .sum();
-                if x > 0.0
-                    && word_width > 0.0
-                    && word_width <= width as f32
-                    && x + word_width > width as f32
-                {
+                if x > 0.0 && word_width <= width as f32 && x + word_width > width as f32 {
                     row_widths.push(x);
                     x = 0.0;
                     y += row_height;
                 }
-                let mut part_x = x;
-                for c in text.chars() {
-                    if c == '\r' {
+                for (c, word) in unit {
+                    if c == '\n' {
+                        row_widths.push(x);
+                        x = 0.0;
+                        y += row_height;
                         continue;
                     }
                     let glyph = self.glyph(c);
                     let advance = glyph.metrics.advance_width;
-                    if c == '\n' || (x + advance > width as f32 && x > 0.0) {
-                        if let Some(index) = word {
-                            if x > part_x {
-                                words.push(WordBox {
-                                    x: part_x,
-                                    y,
-                                    width: x - part_x,
-                                    height: row_height,
-                                    index,
-                                });
-                            }
-                        }
+                    if c.is_whitespace() && (x == 0.0 || x + advance > width as f32) {
+                        continue;
+                    }
+                    // Only a word wider than the pane itself needs a hard break.
+                    if x + advance > width as f32 && x > 0.0 {
                         row_widths.push(x);
                         x = 0.0;
-                        part_x = 0.0;
                         y += row_height;
-                        if c == '\n' {
-                            continue;
-                        }
                     }
                     let top = y + px - glyph.metrics.height as f32 - glyph.metrics.ymin as f32;
                     glyphs.push(PlacedGlyph {
@@ -220,18 +218,22 @@ impl PixelLyrics {
                         glyph,
                         word,
                     });
-                    x += advance;
-                }
-                if let Some(index) = word {
-                    if x > part_x {
-                        words.push(WordBox {
-                            x: part_x,
-                            y,
-                            width: x - part_x,
-                            height: row_height,
-                            index,
-                        });
+                    if let Some(index) = word {
+                        if let Some(region) =
+                            words.last_mut().filter(|r| r.index == index && r.y == y)
+                        {
+                            region.width = x + advance - region.x;
+                        } else {
+                            words.push(WordBox {
+                                x,
+                                y,
+                                width: advance,
+                                height: row_height,
+                                index,
+                            });
+                        }
                     }
+                    x += advance;
                 }
             }
             row_widths.push(x);

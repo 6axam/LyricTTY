@@ -71,6 +71,10 @@ pub struct App {
     url_input: String,
     status: String,
     alignment_status: Option<String>,
+    preparing_track: Option<String>,
+    resume_after_preparation: bool,
+    native_start_requested: bool,
+    native_before_open: Option<String>,
     karaoke: bool,
     last: Instant,
     started: Instant,
@@ -118,6 +122,10 @@ impl App {
             url_input: String::new(),
             status: "Discovering music sources… · o open URL · s sources · ? help".into(),
             alignment_status: None,
+            preparing_track: None,
+            resume_after_preparation: false,
+            native_start_requested: false,
+            native_before_open: None,
             karaoke: false,
             last: Instant::now(),
             started: Instant::now(),
@@ -163,6 +171,14 @@ impl App {
         self.dirty = true;
     }
     pub fn cleanup_graphics(&mut self, output: &mut impl std::io::Write) -> std::io::Result<()> {
+        if self.resume_after_preparation {
+            if let (Some(source), Some(service)) = (self.source(), &self.service) {
+                if source.source_id != "native" && source.status == PlaybackStatus::Paused {
+                    service.command(&source.source_id, PlaybackCommand::Play);
+                }
+            }
+            self.resume_after_preparation = false;
+        }
         if self.panel_protocol.is_some() {
             let id = 0x5000_0000 | (std::process::id() & 0x00ff_ffff);
             output.write_all(format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").as_bytes())?;
@@ -191,6 +207,17 @@ impl App {
         (self.position() + self.config.lyrics_offset_ms as f32 / 1000.0).max(0.0)
     }
     fn command(&mut self, c: PlaybackCommand) {
+        if matches!(
+            c,
+            PlaybackCommand::Play
+                | PlaybackCommand::Pause
+                | PlaybackCommand::PlayPause
+                | PlaybackCommand::Next
+                | PlaybackCommand::Previous
+        ) {
+            self.resume_after_preparation = false;
+            self.native_start_requested = false;
+        }
         if let (Some(id), Some(service)) = (&self.active_source, &self.service) {
             service.command(id, c);
         } else {
@@ -245,6 +272,15 @@ impl App {
                 self.open_native(url);
             }
         }
+        if self.native_start_requested
+            && self.source().is_some_and(|s| {
+                s.source_id == "native"
+                    && self.native_before_open.as_deref() == Some(s.track.id.as_str())
+            })
+        {
+            self.dirty = true;
+            return;
+        }
         let key = self
             .source()
             .map(|s| {
@@ -259,6 +295,30 @@ impl App {
             })
             .unwrap_or_default();
         if key != self.track_key {
+            if self.config.audio_alignment && self.config.prepare_before_playback && !self.demo {
+                if let Some(source) = self.source().filter(|s| !s.track.title.is_empty()) {
+                    let identity = format!("{}:{}", source.source_id, source.track.id);
+                    let opening_native =
+                        source.source_id == "native" && self.native_start_requested;
+                    let resume = source.status == PlaybackStatus::Playing
+                        || opening_native
+                        || (self.preparing_track.as_deref() == Some(identity.as_str())
+                            && self.resume_after_preparation);
+                    let pause =
+                        source.status == PlaybackStatus::Playing && source.capabilities.pause;
+                    let id = source.source_id.clone();
+                    self.preparing_track = Some(identity);
+                    self.resume_after_preparation = resume;
+                    if opening_native {
+                        self.native_start_requested = false;
+                    }
+                    if pause {
+                        if let Some(service) = &self.service {
+                            service.command(&id, PlaybackCommand::Pause);
+                        }
+                    }
+                }
+            }
             self.track_key = key.clone();
             self.content = LyricsContent::default();
             self.artwork = None;
@@ -303,6 +363,13 @@ impl App {
         self.dirty = true;
     }
     fn open_native(&mut self, url: String) {
+        self.native_before_open = self
+            .sources
+            .iter()
+            .find(|s| s.source_id == "native")
+            .map(|s| s.track.id.clone());
+        self.native_start_requested =
+            self.config.audio_alignment && self.config.prepare_before_playback;
         if let Some(service) = &self.service {
             self.manual_source = Some("native".into());
             self.active_source = Some("native".into());
@@ -311,9 +378,6 @@ impl App {
         }
     }
     pub fn tick(&mut self) {
-        if let Some(worker) = &self.asset_request {
-            worker.playback(&self.asset_key, self.source());
-        }
         let dt = self.last.elapsed().as_secs_f32();
         self.last = Instant::now();
         let mut events = Vec::new();
@@ -339,6 +403,24 @@ impl App {
         }
         for event in assets {
             match event {
+                lyrictty::assets::AssetEvent::AlignmentReady { key, prepared }
+                    if key == self.asset_key =>
+                {
+                    if !prepared {
+                        self.status =
+                            "Word preparation unavailable; playing with existing lyrics".into();
+                    }
+                    if self.resume_after_preparation {
+                        self.resume_after_preparation = false;
+                        if self
+                            .source()
+                            .is_some_and(|s| s.status != PlaybackStatus::Playing)
+                        {
+                            self.command(PlaybackCommand::Play);
+                        }
+                    }
+                    self.dirty = true;
+                }
                 lyrictty::assets::AssetEvent::AlignmentStatus { key, message }
                     if key == self.asset_key =>
                 {
@@ -1290,7 +1372,7 @@ fn fmt(s: f32) -> String {
 }
 pub fn doctor() -> Result<()> {
     println!("LyricTTY doctor (development)");
-    for name in ["mpv", "yt-dlp", "pactl", "parec"] {
+    for name in ["mpv", "yt-dlp", "ffmpeg", "ffprobe"] {
         let ok = Command::new(name)
             .arg("--version")
             .output()
@@ -1314,18 +1396,6 @@ pub fn doctor() -> Result<()> {
     println!(
         "{} Kitty terminal (ANSI artwork fallback enabled)",
         if std::env::var_os("KITTY_WINDOW_ID").is_some() {
-            "✓"
-        } else {
-            "!"
-        }
-    );
-    println!(
-        "{} Playback-output monitor (word recognition)",
-        if Command::new("pactl")
-            .arg("get-default-sink")
-            .output()
-            .is_ok_and(|o| o.status.success())
-        {
             "✓"
         } else {
             "!"

@@ -172,24 +172,18 @@ struct Glyph {
 }
 fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) -> Vec<Vec<Glyph>> {
     let fill_color = crate::theme::lyric_fill(palette);
-    let mut rows = vec![Vec::new()];
-    let mut used = 0;
+    let mut units: Vec<Vec<Glyph>> = vec![Vec::new()];
     let active = active_word(line, position);
     let mut push = |text: &str, color: Color, timestamp: Option<f32>| {
         for g in text.graphemes(true) {
-            let size = g.width();
-            if g == "\n" || (used + size > width && used > 0) {
-                rows.push(Vec::new());
-                used = 0;
-            }
-            if g != "\n" && size <= width {
-                rows.last_mut().unwrap().push(Glyph {
-                    text: g.to_owned(),
-                    width: size,
-                    color,
-                    timestamp,
-                });
-                used += size;
+            units.last_mut().unwrap().push(Glyph {
+                text: g.to_owned(),
+                width: g.width(),
+                color,
+                timestamp,
+            });
+            if g.chars().all(char::is_whitespace) {
+                units.push(Vec::new());
             }
         }
     };
@@ -227,6 +221,39 @@ fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) ->
                 };
                 push(g, color, (word.end > word.start).then_some(word.start));
                 filled_width += size;
+            }
+        }
+    }
+    let mut rows = vec![Vec::new()];
+    let mut used = 0;
+    for unit in units {
+        let word_width = unit
+            .iter()
+            .filter(|g| !g.text.chars().all(char::is_whitespace))
+            .map(|g| g.width)
+            .sum::<usize>();
+        if used > 0 && word_width <= width && used + word_width > width {
+            rows.push(Vec::new());
+            used = 0;
+        }
+        for glyph in unit {
+            if glyph.text == "\n" {
+                rows.push(Vec::new());
+                used = 0;
+                continue;
+            }
+            if glyph.text.chars().all(char::is_whitespace)
+                && (used == 0 || used + glyph.width > width)
+            {
+                continue;
+            }
+            if used + glyph.width > width && used > 0 {
+                rows.push(Vec::new());
+                used = 0;
+            }
+            if glyph.width <= width {
+                used += glyph.width;
+                rows.last_mut().unwrap().push(glyph);
             }
         }
     }

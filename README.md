@@ -92,9 +92,11 @@ The included [authored timing fixture](examples/demo.lrc) has real explicit word
 lyrictty
 ```
 
-Requires `parec` and `pactl` (PulseAudio tools, also available with PipeWire's PulseAudio compatibility). The recognizer listens only to the default playback sink's monitor, never the microphone. Audio stays local and is not saved. It matches recognized words against the supplied lyrics; unrecognized words remain unfilled rather than receiving uniform estimated timings.
+Requires `ffmpeg`, `ffprobe`, and `yt-dlp` for public remote audio. LyricTTY obtains a separate audio file and prepares the complete word timeline on a background worker before playback. Local files and direct source URLs are preferred. If browser metadata has no source URL, a bounded public lookup requires matching artist/title/version and duration; uncertain recordings are rejected. No browser cookies or account credentials are used.
 
-The first listen learns words with recognition delay; later listens reuse saved acoustic timestamps. Singing, loud accompaniment and incorrect line timestamps can reduce matches. This is confidence-filtered speech recognition, not guaranteed forced alignment. Small Russian/English models download about 45/40 MB and typically need around 300 MB RAM while loaded. Recognition runs at low priority on one CPU, with throttling and no GPU. Pausing stops capture and inference. Fully timed songs use their existing cues and do not start the recognizer. Disable with `audio_alignment = false` and restart.
+By default `prepare_before_playback = true` pauses the selected playing source while preparing, then resumes its saved position. Native files load paused. Press Space to bypass waiting; `prepare_before_playback = false` leaves music playing while preparation continues independently. Failure resumes intended playback with the original lyrics and a visible error, without silently switching to delayed live recognition.
+
+Prepared timelines are cached, including partially matched words, so subsequent plays do not run recognition. Only acoustically matched words are filled; singing, loud accompaniment, incorrect lyrics and mismatched recordings can reduce coverage. The recognizer uses a small local Vosk model, low priority and one CPU with throttling; no GPU is needed. Russian/English model downloads are about 45/40 MB and use roughly 300 MB RAM while loaded. Transient audio is deleted after preparation; no audio is uploaded or captured from the microphone. Disable preparation with `audio_alignment = false` and restart.
 
 [Kitty pixel scrolling — actual 60 FPS recording](assets/smooth-lyrics.mp4)
 

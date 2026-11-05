@@ -88,6 +88,7 @@ fn main() -> Result<()> {
     }
     let options = options(args)?;
     let config = Config::load(&config::config_path())?;
+    let pause_on_open = config.audio_alignment && config.prepare_before_playback;
     let mut app = App::new(config.clone(), options.debug);
     app.startup(options.url, options.lyrics, options.demo);
     app.asset_request = Some(AssetService::start(config, config::cache_path()));
@@ -98,8 +99,9 @@ fn main() -> Result<()> {
                 Vec::new(),
             );
         }
-        let mut backends: Vec<Box<dyn PlaybackBackend>> =
-            vec![Box::new(playback::native::NativeBackend::new())];
+        let mut backends: Vec<Box<dyn PlaybackBackend>> = vec![Box::new(
+            playback::native::NativeBackend::new().with_pause_on_open(pause_on_open),
+        )];
         let mut errors = Vec::new();
         match playback::mpris::MprisBackend::new() {
             Ok(b) => backends.push(Box::new(b)),

@@ -9,6 +9,7 @@ Ratatui UI / App / hit regions
   │                     └── NativeBackend (mpv Unix JSON IPC)
   └── AssetService
        ├── LyricsService → LyricsProvider → LocalLyrics / LRCLIB
+       ├── AlignmentHandle → separate audio → Vosk word cues / prepared timeline cache
        └── ArtworkProvider → bounded decode / disk cache → ThemeTransition
 ```
 
@@ -27,3 +28,5 @@ Artwork is cached by hashed URL. Quantized, saturation-weighted color bins selec
 `InstrumentalState` exposes Lyrics → EnteringInstrumental → Instrumental → LeavingInstrumental → Lyrics. Missing lyrics are not evidence of an instrumental track. Explicit word ends and lyric gaps drive the fade; plain LRC requires an estimate. The current animation is intentionally labeled ambient, ready for a future audio-analysis source.
 
 `layout` computes bounded Compact/Standard/Wide regions; the renderer rebuilds hit regions on every draw. `config` owns TOML settings. `--demo` selects an explicit silent fixture backend and authored assets; normal startup never injects demo metadata.
+
+Audio preparation runs in a cancellable process group on a separate worker. It resolves and validates the recording, decodes mono audio, and aligns known lyric sequences before publishing a completed timeline. Progress and completion events control the optional playback hold; source generations prevent stale jobs from resuming a different song. Process output is drained through EOF before completion, and temporary audio is removed on success, failure, cancellation or exit. UI frames use only playback position and saved word intervals. Both lyric renderers wrap visible words independently of timing/syllable boundaries.

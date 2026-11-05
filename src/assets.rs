@@ -12,6 +12,7 @@ use std::{
     thread,
 };
 pub enum AssetEvent {
+    AlignmentReady { key: String, prepared: bool },
     AlignmentStatus { key: String, message: String },
     Lyrics { key: String, content: LyricsContent },
     Artwork { key: String, artwork: Artwork },
@@ -32,7 +33,7 @@ impl AssetService {
     pub fn start(config: Config, cache: PathBuf) -> Self {
         let (requests, rx) = mpsc::channel::<Request>();
         let (tx, events) = mpsc::channel();
-        let alignment = AlignmentHandle::start(cache.join("audio-words-v1"), tx.clone());
+        let alignment = AlignmentHandle::start(cache.join("audio-prepared-v1"), tx.clone());
         let align_worker = alignment.clone();
         // Dedicated workers let a slow lyrics server coexist with a fast cover.
         let (art_tx, art_rx) = mpsc::channel::<(String, String)>();
@@ -148,9 +149,6 @@ impl AssetService {
             local,
             demo,
         });
-    }
-    pub fn playback(&self, key: &str, source: Option<&crate::playback::PlaybackSnapshot>) {
-        self.alignment.playback(key, source);
     }
 }
 impl Drop for AssetService {

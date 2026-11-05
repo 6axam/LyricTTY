@@ -81,6 +81,7 @@ impl Default for NativeOptions {
 }
 
 pub struct NativeBackend {
+    pause_on_open: bool,
     options: NativeOptions,
     session: Option<Session>,
 }
@@ -98,9 +99,15 @@ impl NativeBackend {
 
     pub fn with_options(options: NativeOptions) -> Self {
         Self {
+            pause_on_open: false,
             options,
             session: None,
         }
+    }
+
+    pub fn with_pause_on_open(mut self, paused: bool) -> Self {
+        self.pause_on_open = paused;
+        self
     }
 
     fn session(&mut self) -> Result<&mut Session> {
@@ -147,11 +154,13 @@ impl PlaybackBackend for NativeBackend {
                 if input.trim().is_empty() || input.contains('\0') {
                     bail!("a nonempty URL or local path is required");
                 }
+                let paused = self.pause_on_open;
                 let session = self.session()?;
+                session.request(json!(["set_property", "pause", paused]))?;
                 // loadfile is accepted immediately; mpv's ytdl hook performs
                 // extraction on mpv's side, without a second extractor process.
                 session.request(json!(["loadfile", input, "replace"]))?;
-                session.request(json!(["set_property", "pause", false]))?;
+                session.request(json!(["set_property", "pause", paused]))?;
             }
             PlaybackCommand::Volume(volume) => {
                 if !volume.is_finite() {
@@ -479,7 +488,7 @@ impl PlayerState {
                 })
         });
         self.snapshot.track = Track {
-            id: format!("native:{path}"),
+            id: format!("native:{path}:{}", self.file_epoch),
             title,
             artist,
             album,

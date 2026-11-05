@@ -1,15 +1,10 @@
-//! Playback-output recognition runs in one disposable, low-priority process.
-use crate::{
-    assets::AssetEvent,
-    content::LyricsContent,
-    lyrics::LyricLine,
-    playback::{PlaybackSnapshot, PlaybackStatus, Track},
-};
+//! Prepare acoustic lyric cues from an independent audio file before playback.
+use crate::{assets::AssetEvent, content::LyricsContent, lyrics::LyricLine, playback::Track};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -24,7 +19,6 @@ use std::{
 #[derive(Clone)]
 pub struct AlignmentHandle {
     requests: Sender<Request>,
-    playback: Arc<Mutex<Playback>>,
     generation: Arc<AtomicU64>,
     stopped: Arc<AtomicBool>,
     worker: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
@@ -35,38 +29,20 @@ struct Request {
     content: LyricsContent,
     generation: u64,
 }
-struct Playback {
-    key: String,
-    position: f64,
-    rate: f64,
-    playing: bool,
-    updated: Instant,
-}
-impl Default for Playback {
-    fn default() -> Self {
-        Self {
-            key: String::new(),
-            position: 0.0,
-            rate: 1.0,
-            playing: false,
-            updated: Instant::now(),
-        }
-    }
-}
-#[derive(Serialize)]
-struct Clock {
-    position: f64,
-    playing: bool,
-    rate: f64,
-}
 #[derive(Serialize, Deserialize)]
 struct Cached {
+    #[serde(default)]
+    prepared: bool,
     lines: Vec<LyricLine>,
 }
 #[derive(Deserialize)]
 struct Update {
-    line: usize,
+    line: Option<usize>,
+    #[serde(default)]
     words: Vec<crate::lyrics::LyricWord>,
+    status: Option<String>,
+    #[serde(default)]
+    prepared: bool,
 }
 
 impl AlignmentHandle {
@@ -74,7 +50,6 @@ impl AlignmentHandle {
         let (requests, rx) = mpsc::channel::<Request>();
         let handle = Self {
             requests,
-            playback: Arc::new(Mutex::new(Playback::default())),
             generation: Arc::new(AtomicU64::new(0)),
             stopped: Arc::new(AtomicBool::new(false)),
             worker: Arc::new(Mutex::new(None)),
@@ -93,10 +68,15 @@ impl AlignmentHandle {
                 if worker.cancelled(&request) {
                     continue;
                 }
-                if let Err(error) = worker.align(&request, &cache, &events) {
-                    if !worker.cancelled(&request) {
-                        report(&events, &request.key, &format!("Слова по голосу: {error}"));
+                let result = worker.align(&request, &cache, &events);
+                if !worker.cancelled(&request) {
+                    if let Err(error) = &result {
+                        report(&events, &request.key, &format!("Подготовка слов: {error}"));
                     }
+                    let _ = events.send(AssetEvent::AlignmentReady {
+                        key: request.key.clone(),
+                        prepared: result.is_ok(),
+                    });
                 }
             }
         });
@@ -121,33 +101,9 @@ impl AlignmentHandle {
             generation,
         });
     }
-    pub fn playback(&self, key: &str, source: Option<&PlaybackSnapshot>) {
-        let mut state = self.playback.lock().unwrap_or_else(|e| e.into_inner());
-        *state = Playback {
-            key: key.into(),
-            position: source.map(|s| s.position_now()).unwrap_or(0.0),
-            rate: source.map(|s| s.rate).unwrap_or(1.0),
-            playing: source.is_some_and(|s| s.status == PlaybackStatus::Playing),
-            updated: Instant::now(),
-        };
-    }
     fn cancelled(&self, request: &Request) -> bool {
         self.stopped.load(Ordering::Relaxed)
             || self.generation.load(Ordering::Relaxed) != request.generation
-    }
-    fn clock(&self, key: &str) -> Clock {
-        let state = self.playback.lock().unwrap_or_else(|e| e.into_inner());
-        let playing = state.key == key && state.playing;
-        Clock {
-            position: state.position
-                + if playing {
-                    state.updated.elapsed().as_secs_f64() * state.rate
-                } else {
-                    0.0
-                },
-            playing,
-            rate: state.rate,
-        }
     }
     fn align(
         &self,
@@ -167,6 +123,7 @@ impl AlignmentHandle {
             &request.track.title,
             &request.track.album,
             request.track.duration.round() as i64,
+            &request.track.url,
             &request.content.lines,
         ))?;
         let path = cache.join(format!("{:x}.json", Sha256::digest(fingerprint)));
@@ -186,6 +143,10 @@ impl AlignmentHandle {
                             }
                         }
                         publish(events, &request.key, &content);
+                        if cached.prepared && matched_words(&content) > 0 {
+                            report(events, &request.key, "По словам · готовая разметка из кэша");
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -219,11 +180,14 @@ impl AlignmentHandle {
         let helper = temp.path().join("align.py");
         let input = temp.path().join("request.json");
         fs::write(&helper, include_str!("../scripts/align_lyrics.py"))?;
-        let initial = self.clock(&request.key);
+        fs::write(
+            temp.path().join("prepare_audio.py"),
+            include_str!("../scripts/prepare_audio.py"),
+        )?;
         fs::write(
             &input,
             serde_json::to_vec(
-                &serde_json::json!({"lines":content.lines, "position":initial.position, "playing":initial.playing, "rate":initial.rate}),
+                &serde_json::json!({"lines":content.lines, "track":request.track, "work_dir":temp.path(), "position":0.0, "playing":false, "rate":1.0}),
             )?,
         )?;
         let log = temp.path().join("error.log");
@@ -231,6 +195,7 @@ impl AlignmentHandle {
         command
             .args(["-u"])
             .arg(helper)
+            .arg("--offline")
             .arg("--request")
             .arg(input)
             .arg("--model")
@@ -238,7 +203,7 @@ impl AlignmentHandle {
             .env("OMP_NUM_THREADS", "1")
             .env("OPENBLAS_NUM_THREADS", "1")
             .env("MKL_NUM_THREADS", "1")
-            .stdin(Stdio::piped())
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(fs::File::create(&log)?));
         #[cfg(unix)]
@@ -248,34 +213,56 @@ impl AlignmentHandle {
         }
         let mut child = Process(command.spawn()?);
         let stdout = child.0.stdout.take().unwrap();
-        let mut stdin = child.0.stdin.take().unwrap();
         let (lines_tx, lines_rx) = mpsc::sync_channel(16);
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
-                if lines_tx.send(line).is_err() {
-                    break;
+                if lines_tx.send(Some(line)).is_err() {
+                    return;
                 }
             }
+            let _ = lines_tx.send(None);
         });
-        report(events, &request.key, "Слушаю слова · тайминги сохраняются");
-        let mut last_update = Instant::now() - Duration::from_secs(1);
+        report(events, &request.key, "Подготавливаю аудио и тайминги слов…");
+        let started = Instant::now();
+        let mut output_closed = false;
+        let mut prepared = false;
         while !self.cancelled(request) {
-            if last_update.elapsed() >= Duration::from_millis(200) {
-                let clock = self.clock(&request.key);
-                if writeln!(stdin, "{}", serde_json::to_string(&clock)?).is_err() {
-                    break;
-                }
-                last_update = Instant::now();
-            }
+            anyhow::ensure!(
+                started.elapsed() < Duration::from_secs(180),
+                "превышено время подготовки аудио"
+            );
             for line in lines_rx.try_iter() {
+                let Some(line) = line else {
+                    output_closed = true;
+                    continue;
+                };
                 if line.len() > 256 * 1024 {
                     continue;
                 }
                 let Ok(update) = serde_json::from_str::<Update>(&line) else {
                     continue;
                 };
-                let Some(base) = content.lines.get_mut(update.line) else {
+                if let Some(status) = update.status {
+                    let message = match status.as_str() {
+                        "preparing_audio" => "Подготавливаю аудио…",
+                        "searching_audio" => "Ищу запись по названию и длительности…",
+                        "downloading_audio" => "Загружаю аудио для разметки…",
+                        "validating_audio" => "Проверяю совпадение записи…",
+                        "decoding_audio" => "Подготавливаю звук для анализа…",
+                        "loading_model" => "Загружаю модель…",
+                        "aligning_lyrics" => "Сопоставляю слова с аудио…",
+                        _ => "Подготавливаю тайминги слов…",
+                    };
+                    report(events, &request.key, message);
+                }
+                if update.prepared {
+                    prepared = true;
+                }
+                let Some(index) = update.line else {
+                    continue;
+                };
+                let Some(base) = content.lines.get_mut(index) else {
                     continue;
                 };
                 if !valid_words(base, &update.words) {
@@ -290,30 +277,13 @@ impl AlignmentHandle {
                 if self.cancelled(request) {
                     break;
                 }
-                publish(events, &request.key, &content);
-                let matched = content
-                    .lines
-                    .iter()
-                    .flat_map(|l| &l.words)
-                    .filter(|w| w.end > w.start)
-                    .count();
+                let matched = matched_words(&content);
                 report(
                     events,
                     &request.key,
-                    &format!("По голосу · {matched} слов сохранено"),
+                    &format!("Подготавливаю разметку · {matched} слов"),
                 );
-                let mut file = tempfile::NamedTempFile::new_in(cache)?;
-                serde_json::to_writer(
-                    file.as_file_mut(),
-                    &Cached {
-                        lines: content.lines.clone(),
-                    },
-                )?;
-                let _ = file.persist(&path);
-            }
-            if content.lines.iter().all(complete) {
-                report(events, &request.key, "По словам · сохранённые тайминги");
-                break;
+                save(cache, &path, &content, false)?;
             }
             if let Some(status) = child.0.try_wait()? {
                 if !status.success() {
@@ -327,12 +297,48 @@ impl AlignmentHandle {
                         .collect::<String>();
                     anyhow::bail!("{detail}");
                 }
-                break;
+                if output_closed {
+                    break;
+                }
             }
             thread::sleep(Duration::from_millis(40));
         }
+        if self.cancelled(request) {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            prepared && matched_words(&content) > 0,
+            "не удалось надёжно привязать слова к этой записи"
+        );
+        save(cache, &path, &content, true)?;
+        publish(events, &request.key, &content);
+        report(
+            events,
+            &request.key,
+            &format!("Готово · {} слов по аудио", matched_words(&content)),
+        );
         Ok(())
     }
+}
+fn matched_words(content: &LyricsContent) -> usize {
+    content
+        .lines
+        .iter()
+        .flat_map(|l| &l.words)
+        .filter(|w| w.end > w.start)
+        .count()
+}
+fn save(cache: &Path, path: &Path, content: &LyricsContent, prepared: bool) -> anyhow::Result<()> {
+    let mut file = tempfile::NamedTempFile::new_in(cache)?;
+    serde_json::to_writer(
+        file.as_file_mut(),
+        &Cached {
+            lines: content.lines.clone(),
+            prepared,
+        },
+    )?;
+    file.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 fn complete(line: &LyricLine) -> bool {
     !line.text.chars().any(char::is_alphanumeric)
@@ -364,7 +370,7 @@ fn valid_words(line: &LyricLine, words: &[crate::lyrics::LyricWord]) -> bool {
 }
 fn publish(events: &Sender<AssetEvent>, key: &str, content: &LyricsContent) {
     let mut content = content.clone();
-    content.quality = "Audio word timing · Vosk (partial until heard)".into();
+    content.quality = "Audio word timing · prepared offline".into();
     let _ = events.send(AssetEvent::Lyrics {
         key: key.into(),
         content,
