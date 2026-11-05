@@ -237,13 +237,17 @@ impl PixelLyrics {
             row_widths.push(x);
             for glyph in &mut glyphs {
                 let row = (glyph.row_y / row_height) as usize;
-                glyph.x += ((width as f32 - row_widths[row.min(row_widths.len() - 1)]) / 2.0)
-                    .floor() as i32;
+                if karaoke {
+                    glyph.x += ((width as f32 - row_widths[row.min(row_widths.len() - 1)]) / 2.0)
+                        .floor() as i32;
+                }
             }
             for region in &mut words {
                 let row = (region.y / row_height) as usize;
-                region.x +=
-                    ((width as f32 - row_widths[row.min(row_widths.len() - 1)]) / 2.0).floor();
+                if karaoke {
+                    region.x +=
+                        ((width as f32 - row_widths[row.min(row_widths.len() - 1)]) / 2.0).floor();
+                }
             }
             let height = (y + row_height).ceil() as u32;
             self.lines.push(RasterLine {

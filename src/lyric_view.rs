@@ -135,7 +135,7 @@ pub fn render(
                     })
                     .collect::<Vec<_>>();
                 let row_width = glyphs.iter().map(|g| g.width).sum::<usize>() as u16;
-                let x = area.x + 1 + (area.width.saturating_sub(2).saturating_sub(row_width)) / 2;
+                let x = area.x + 1;
                 let rect = Rect::new(x, row as u16, row_width.min(area.width - 2), 1);
                 f.render_widget(Paragraph::new(Line::from(spans)), rect);
                 if weight >= 0.5 {

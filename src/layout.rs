@@ -24,6 +24,33 @@ pub struct Areas {
     pub status: Rect,
 }
 pub fn areas(a: Rect, karaoke: bool) -> Areas {
+    if !karaoke && tier(a) != Tier::Compact {
+        let margin = (a.width / 28).clamp(2, 6);
+        let top = (a.height / 12).clamp(1, 3);
+        let bottom = (a.height / 14).clamp(1, 3);
+        let usable = a.width.saturating_sub(margin * 2 + 3);
+        let left = usable * 49 / 100;
+        let x = a.x + margin;
+        let footer = a.bottom().saturating_sub(bottom + 3);
+        return Areas {
+            header: Rect::default(),
+            metadata: Rect::new(x, a.y + top, left, footer.saturating_sub(a.y + top)),
+            lyrics: Rect::new(
+                x + left + 3,
+                a.y + top,
+                usable - left,
+                a.height.saturating_sub(top + bottom),
+            ),
+            progress: Rect::new(x + 2, footer, left.saturating_sub(4), 1),
+            controls: Rect::new(x + 2, footer + 2, left.saturating_sub(4), 1),
+            status: Rect::new(
+                a.x + margin,
+                a.bottom() - 1,
+                a.width.saturating_sub(margin * 2),
+                1,
+            ),
+        };
+    }
     let header_h = if a.height >= 10 { 2 } else { 1 };
     let footer_h = if a.height >= 10 {
         4

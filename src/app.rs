@@ -644,6 +644,18 @@ impl App {
         let source_name = source
             .map(|s| s.source_name.as_str())
             .unwrap_or("No source");
+        if !self.karaoke && tier_for(a) != Tier::Compact {
+            let panel_y = areas.metadata.bottom().saturating_sub(3);
+            f.render_widget(
+                Block::default().style(Style::default().bg(p.panel)),
+                Rect::new(
+                    areas.metadata.x,
+                    panel_y,
+                    areas.metadata.width,
+                    areas.controls.bottom().saturating_sub(panel_y) + 1,
+                ),
+            );
+        }
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  LYRICTTY", Style::default().fg(p.accent).bold()),
@@ -671,9 +683,13 @@ impl App {
         } else {
             "  ♪ Текст песни  ·  LIVE "
         };
-        let block = Block::default()
-            .title(title)
-            .style(Style::default().fg(p.muted));
+        let block = if tier_for(a) == Tier::Compact || self.karaoke {
+            Block::default()
+                .title(title)
+                .style(Style::default().fg(p.muted))
+        } else {
+            Block::default().style(Style::default().fg(p.muted))
+        };
         let inner = block.inner(areas.lyrics);
         f.render_widget(block, areas.lyrics);
         if self.content.lines.is_empty() {
@@ -782,15 +798,25 @@ impl App {
             .source()
             .map(|s| (s.volume * 100.0).round() as u32)
             .unwrap_or(0);
-        f.render_widget(
-            Paragraph::new(format!(
-                " ⇄  ◀  {}  ▶  ↻    vol {}%",
-                if playing { "❚❚" } else { "▶ " },
-                volume
-            ))
-            .style(Style::default().fg(p.accent)),
-            areas.controls,
+        let control_text = format!(" ⇄  ◀  {}  ▶  ↻", if playing { "❚❚" } else { "▶ " });
+        let control_width = 16.min(areas.controls.width);
+        self.controls_rect = Rect::new(
+            areas.controls.x + areas.controls.width.saturating_sub(control_width) / 2,
+            areas.controls.y,
+            control_width,
+            areas.controls.height,
         );
+        f.render_widget(
+            Paragraph::new(control_text).style(Style::default().fg(p.fg).bg(p.panel)),
+            self.controls_rect,
+        );
+        if areas.controls.width >= 30 {
+            f.render_widget(
+                Paragraph::new(format!("◖ {volume}%"))
+                    .style(Style::default().fg(p.muted).bg(p.panel)),
+                Rect::new(areas.controls.x, areas.controls.y, 8, areas.controls.height),
+            );
+        }
         let status = if self.debug {
             format!(
                 "  {} · {:?} · {:.2}s · {}×{} · {}",
@@ -808,10 +834,12 @@ impl App {
         } else {
             format!("  {}", self.status)
         };
-        f.render_widget(
-            Paragraph::new(status).style(Style::default().fg(p.muted)),
-            areas.status,
-        );
+        if self.debug || tier_for(a) == Tier::Compact || self.karaoke {
+            f.render_widget(
+                Paragraph::new(status).style(Style::default().fg(p.muted)),
+                areas.status,
+            );
+        }
         if self.overlay != Overlay::None {
             self.draw_overlay(f);
         }
@@ -829,7 +857,6 @@ impl App {
             .map(|s| s.track.artist.as_str())
             .unwrap_or("Native + browser playback")
             .to_owned();
-        let album = source.map(|s| s.track.album.clone()).unwrap_or_default();
         if tier == Tier::Compact {
             let mut metadata = a;
             if a.height >= 7 && self.config.show_artwork {
@@ -853,13 +880,13 @@ impl App {
             );
             return;
         }
-        let mut y = a.y + 1;
+        let mut y = a.y;
         if self.config.show_artwork {
-            let width = a.width.saturating_sub(4).min(40);
-            let height = (width / 2).min(a.height.saturating_sub(9));
-            let rect = Rect::new(a.x + 2, y, width, height);
+            let width = a.width;
+            let height = a.height.saturating_sub(4);
+            let rect = Rect::new(a.x, y, width, height);
             self.draw_artwork(f, rect);
-            y = y.saturating_add(height + 2);
+            y = y.saturating_add(height + 1);
         }
         if y >= a.bottom() {
             return;
@@ -867,12 +894,7 @@ impl App {
         f.render_widget(
             Paragraph::new(vec![
                 Line::styled(title, Style::default().fg(p.fg).bold()),
-                Line::from(""),
-                Line::styled(artist, Style::default().fg(p.accent)),
-                Line::from(""),
-                Line::styled(album, Style::default().fg(p.muted)),
-                Line::from(""),
-                Line::styled(self.content.quality.as_str(), Style::default().fg(p.muted)),
+                Line::styled(artist, Style::default().fg(p.muted)),
             ])
             .wrap(Wrap { trim: true }),
             Rect::new(a.x + 2, y, a.width.saturating_sub(4), a.bottom() - y),
