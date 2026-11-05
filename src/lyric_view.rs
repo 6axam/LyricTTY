@@ -130,7 +130,13 @@ pub fn render(
                     .map(|g| {
                         Span::styled(
                             g.text.clone(),
-                            style.fg(mix(palette.bg, g.color, weight * emphasis)),
+                            style
+                                .fg(mix(palette.bg, g.color, weight * emphasis))
+                                .bg(mix(
+                                    palette.bg,
+                                    palette.accent,
+                                    g.highlight * weight * emphasis * 0.32,
+                                )),
                         )
                     })
                     .collect::<Vec<_>>();
@@ -169,12 +175,13 @@ struct Glyph {
     width: usize,
     color: Color,
     timestamp: Option<f32>,
+    highlight: f32,
 }
 fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) -> Vec<Vec<Glyph>> {
     let mut rows = vec![Vec::new()];
     let mut used = 0;
     let active = active_word(line, position);
-    let mut push = |text: &str, color: Color, timestamp: Option<f32>| {
+    let mut push = |text: &str, color: Color, timestamp: Option<f32>, highlight: f32| {
         for g in text.graphemes(true) {
             let size = g.width();
             if g == "\n" || (used + size > width && used > 0) {
@@ -187,13 +194,19 @@ fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) ->
                     width: size,
                     color,
                     timestamp,
+                    highlight,
                 });
                 used += size;
             }
         }
     };
     if line.words.is_empty() {
-        push(&line.text, palette.fg, None);
+        push(
+            &line.text,
+            palette.fg,
+            None,
+            crate::lyrics::highlight_strength(line.start, line.end, position),
+        );
     } else {
         for (wi, word) in line.words.iter().enumerate() {
             let count = word.text.graphemes(true).count().max(1);
@@ -214,7 +227,10 @@ fn wrap_line(line: &LyricLine, width: usize, position: f32, palette: Palette) ->
                 } else {
                     palette.muted
                 };
-                push(g, color, Some(word.start));
+                let fill = (progress * count as f32 - gi as f32).clamp(0.0, 1.0);
+                let highlight = crate::lyrics::highlight_strength(word.start, word.end, position)
+                    * (0.4 + 0.6 * fill);
+                push(g, color, Some(word.start), highlight);
             }
         }
     }

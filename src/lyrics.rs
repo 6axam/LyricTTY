@@ -216,6 +216,23 @@ pub fn active_line(lines: &[LyricLine], position: f32) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// Short eased attack and release for a cue's visual highlight.
+pub fn highlight_strength(start: f32, end: f32, position: f32) -> f32 {
+    if !start.is_finite()
+        || !end.is_finite()
+        || !position.is_finite()
+        || end <= start
+        || position < start
+        || position >= end + 0.18
+    {
+        return 0.0;
+    }
+    let attack = ((position - start) / ((end - start) * 0.35).clamp(0.015, 0.10)).clamp(0.0, 1.0);
+    let release = ((end + 0.18 - position) / 0.18).clamp(0.0, 1.0);
+    let ease = |t: f32| t * t * (3.0 - 2.0 * t);
+    ease(attack) * ease(release)
+}
+
 pub fn active_word(line: &LyricLine, position: f32) -> Option<usize> {
     if !position.is_finite() || position < line.start || position >= line.end {
         return None;
