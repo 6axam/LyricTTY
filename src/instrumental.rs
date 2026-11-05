@@ -55,6 +55,7 @@ impl InstrumentalState {
             self.intensity = ((position - end) / fade)
                 .min((next - position) / fade)
                 .clamp(0.0, 1.0);
+            self.intensity = self.intensity * self.intensity * (3.0 - 2.0 * self.intensity);
             self.phase = if position < end + fade {
                 InstrumentalPhase::EnteringInstrumental
             } else if position > next - fade {

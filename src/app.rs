@@ -8,6 +8,7 @@ use lyrictty::{
     layout::{self, Tier},
     lyric_view::{self, Hit, ScrollState},
     lyrics,
+    pixel_lyrics::PixelLyrics,
     playback::{
         select_auto,
         service::{Event, PlaybackService},
@@ -55,6 +56,8 @@ pub struct App {
     artwork: Option<Artwork>,
     pub picker: Option<Picker>,
     cover_protocol: Option<StatefulProtocol>,
+    pixel_lyrics: Option<PixelLyrics>,
+    pixel_active: bool,
     instrumental: InstrumentalState,
     manual_line: Option<usize>,
     plain_scroll: u16,
@@ -95,6 +98,8 @@ impl App {
             artwork: None,
             picker: None,
             cover_protocol: None,
+            pixel_lyrics: None,
+            pixel_active: false,
             instrumental: InstrumentalState::default(),
             manual_line: None,
             plain_scroll: 0,
@@ -114,6 +119,38 @@ impl App {
             local_lyrics: None,
             demo: false,
         }
+    }
+    pub fn setup_pixel_lyrics(&mut self) {
+        self.pixel_lyrics = self
+            .picker
+            .as_ref()
+            .filter(|p| {
+                p.protocol_type() == ratatui_image::picker::ProtocolType::Kitty
+                    && std::env::var_os("TMUX").is_none()
+            })
+            .and_then(|p| PixelLyrics::system_font(p.font_size()).ok());
+    }
+    pub fn flush_graphics(&mut self, output: &mut impl std::io::Write) -> std::io::Result<()> {
+        if let Some(renderer) = &mut self.pixel_lyrics {
+            renderer.flush(output)?;
+        }
+        Ok(())
+    }
+    pub fn resize_graphics(&mut self) {
+        if let (Some(renderer), Ok(size)) =
+            (&mut self.pixel_lyrics, crossterm::terminal::window_size())
+        {
+            if size.columns > 0 && size.rows > 0 && size.width > 0 && size.height > 0 {
+                renderer.set_cell_size((size.width / size.columns, size.height / size.rows));
+            }
+        }
+        self.dirty = true;
+    }
+    pub fn cleanup_graphics(&mut self, output: &mut impl std::io::Write) -> std::io::Result<()> {
+        if let Some(renderer) = &mut self.pixel_lyrics {
+            renderer.cleanup(output)?;
+        }
+        Ok(())
     }
     pub fn startup(&mut self, url: Option<String>, lyrics: Option<std::path::PathBuf>, demo: bool) {
         self.startup_url = url;
@@ -456,7 +493,7 @@ impl App {
             },
             Overlay::Settings => match k.code {
                 KeyCode::Up => self.selection = self.selection.saturating_sub(1),
-                KeyCode::Down => self.selection = (self.selection + 1).min(5),
+                KeyCode::Down => self.selection = (self.selection + 1).min(6),
                 KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter => {
                     let sign = if k.code == KeyCode::Left { -1 } else { 1 };
                     match self.selection {
@@ -483,6 +520,7 @@ impl App {
                                 (self.config.lyrics_offset_ms + sign * 100).clamp(-10000, 10000)
                         }
                         5 => self.config.low_data = !self.config.low_data,
+                        6 => self.config.pixel_lyrics = !self.config.pixel_lyrics,
                         _ => {}
                     }
                     self.status = if self.config.save(&lyrictty::config::config_path()).is_ok() {
@@ -572,6 +610,10 @@ impl App {
         }
     }
     pub fn draw(&mut self, f: &mut Frame) {
+        if let Some(renderer) = &mut self.pixel_lyrics {
+            renderer.begin_frame();
+        }
+        self.pixel_active = false;
         let a = f.area();
         let p = self.theme.palette();
         let areas = layout::areas(a, self.karaoke);
@@ -654,14 +696,42 @@ impl App {
             faded.fg = theme::mix(p.fg, p.bg, self.instrumental.intensity * 0.93);
             faded.muted = theme::mix(p.muted, p.bg, self.instrumental.intensity * 0.93);
             faded.accent = theme::mix(p.accent, p.bg, self.instrumental.intensity * 0.93);
-            self.hits = lyric_view::render(
-                f,
-                inner,
-                &self.content.lines,
-                self.scroll.current,
-                self.lyric_position(),
-                faded,
-            );
+            let position = self.lyric_position();
+            if self.config.pixel_lyrics
+                && self.overlay == Overlay::None
+                && self.instrumental.intensity < 0.995
+            {
+                if let Some(renderer) = &mut self.pixel_lyrics {
+                    if renderer.supports(&self.content.lines) {
+                        if let Ok(hits) = renderer.prepare(
+                            inner,
+                            &self.content.lines,
+                            self.scroll.current,
+                            position,
+                            faded,
+                            self.karaoke,
+                        ) {
+                            self.hits = hits;
+                            self.pixel_active = true;
+                        }
+                    }
+                }
+            }
+            if !self.pixel_active {
+                self.hits = lyric_view::render(
+                    f,
+                    inner,
+                    &self.content.lines,
+                    self.scroll.current,
+                    position,
+                    faded,
+                );
+            }
+        }
+        if !self.pixel_active {
+            if let Some(renderer) = &mut self.pixel_lyrics {
+                renderer.hide();
+            }
         }
         if self.instrumental.intensity > 0.01 {
             self.draw_instrumental(f, inner);
@@ -724,12 +794,17 @@ impl App {
         );
         let status = if self.debug {
             format!(
-                "  {} · {:?} · {:.2}s · {}×{}",
+                "  {} · {:?} · {:.2}s · {}×{} · {}",
                 self.status,
                 tier_for(a),
                 position,
                 a.width,
-                a.height
+                a.height,
+                if self.pixel_active {
+                    "pixel"
+                } else {
+                    "terminal"
+                }
             )
         } else {
             format!("  {}", self.status)
@@ -919,6 +994,7 @@ impl App {
                 format!("Artwork {}", self.config.show_artwork),
                 format!("Lyrics offset {} ms", self.config.lyrics_offset_ms),
                 format!("Low data {}", self.config.low_data),
+                format!("Pixel lyrics (Kitty) {}", self.config.pixel_lyrics),
             ]
             .iter()
             .enumerate()
@@ -1145,9 +1221,22 @@ mod tests {
         app.content.lines = lyrics::parse_lrc("[00:00]zero\n[00:10]one\n[00:20]two\n[00:30]three");
         app.scroll.target(2.0);
         app.scroll.advance(1.0, 0.8);
-        for (w, h) in [(120, 32), (52, 17)] {
+        for (w, h, pixel) in [
+            (120, 32, false),
+            (52, 17, false),
+            (120, 32, true),
+            (52, 17, true),
+        ] {
+            app.pixel_lyrics = if pixel {
+                Some(
+                    PixelLyrics::system_font((10, 20)).expect("Install fontconfig and a sans font"),
+                )
+            } else {
+                None
+            };
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
             terminal.draw(|f| app.draw(f)).unwrap();
+            assert_eq!(app.pixel_active, pixel);
             let hit = app.hits.iter().find(|hit| hit.line == 2).unwrap().clone();
             app.handle_mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
@@ -1157,7 +1246,7 @@ mod tests {
             });
         }
         let deadline = Instant::now() + Duration::from_secs(2);
-        while log.lock().unwrap().len() < 2 && Instant::now() < deadline {
+        while log.lock().unwrap().len() < 4 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(
@@ -1166,7 +1255,7 @@ mod tests {
                 .iter()
                 .filter(|c| matches!(c,PlaybackCommand::SetPosition(p)if (*p-20.0).abs()<0.01))
                 .count()
-                == 2
+                == 4
         );
         assert_eq!(
             app.position(),

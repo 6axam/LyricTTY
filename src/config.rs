@@ -9,6 +9,7 @@ use std::{
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub fps: u16,
+    pub pixel_lyrics: bool,
     pub scroll_duration_ms: u32,
     pub theme_transition_ms: u32,
     pub manual_follow_timeout_secs: u32,
@@ -22,7 +23,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            fps: 30,
+            fps: 60,
+            pixel_lyrics: true,
             scroll_duration_ms: 850,
             theme_transition_ms: 900,
             manual_follow_timeout_secs: 8,

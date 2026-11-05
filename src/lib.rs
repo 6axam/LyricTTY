@@ -7,6 +7,7 @@ pub mod layout;
 pub mod lyric_view;
 pub mod lyrics;
 pub mod metadata;
+pub mod pixel_lyrics;
 pub mod playback;
 pub mod providers;
 pub mod theme;

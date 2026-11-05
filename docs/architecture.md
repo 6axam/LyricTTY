@@ -16,7 +16,11 @@ Ratatui UI / App / hit regions
 
 `lyrics` preserves exact source word starts/ends and UTF-8 text. `providers` understands ordinary/enhanced LRC and [Lyricsfile](https://github.com/tranxuanthang/lyricsfile), plus the current [LRCLIB API](https://lrclib.net/docs). Explicit local files take precedence. Bounded identified HTTP requests have timeouts and rate-limit cooldowns. Hashed cache keys include normalized metadata, album, duration and provider identity. Provider failures are distinct from definitive no-lyrics results.
 
-`lyric_view` interpolates scroll coordinates with smoothstep easing, calculates wrapped row offsets and splits each row's intensity between adjacent terminal rows. Word progress is grapheme-safe. Hit regions are generated from the same visible layout, including each word's real start, so resize/manual scroll cannot cause row-to-index mistakes.
+`lyric_view` uses minimum-jerk interpolation and retains velocity when a new target arrives mid-transition. Its portable renderer calculates wrapped row offsets and splits each row's intensity between adjacent terminal rows. Word progress is grapheme-safe. Hit regions are generated from the same visible layout, including each word's real start, so resize/manual scroll cannot cause row-to-index mistakes.
+
+In Kitty, `pixel_lyrics` uses cached fontdue glyph masks and PNG line images. Ordinary scroll frames send placement commands with within-cell pixel offsets; line images are re-uploaded only when their opacity, palette or word fill changes. Source crops clip lines at pane boundaries, and pixel rectangles produce mouse hit regions. Overlays remove placements without discarding image caches; exit/track/layout changes free owned image IDs. Complex scripts and combining graphemes fall back to the existing terminal renderer. Font/cell-size changes rebuild layout.
+
+`FramePacer` schedules frame starts from deadlines using nanosecond periods, subtracting render time from the next wait and dropping missed frames. Input does not reset the cadence. Kitty synchronized updates batch terminal and pixel changes into one presentation; static idle screens remain event-driven.
 
 Artwork is cached by hashed URL. Quantized, saturation-weighted color bins select a dominant color; dark palette generation checks foreground/accent contrast. `ThemeTransition` interpolates from the current intermediate palette. Kitty uses a cached image protocol widget; other terminals can use ANSI halfblocks.
 

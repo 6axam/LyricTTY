@@ -20,14 +20,17 @@ pub struct ScrollState {
     target: f32,
     origin: f32,
     elapsed: f32,
+    velocity: f32,
+    initial_velocity: f32,
 }
 impl ScrollState {
     pub fn animating(&self) -> bool {
-        (self.current - self.target).abs() > 0.001
+        (self.current - self.target).abs() > 0.001 || self.velocity.abs() > 0.001
     }
     pub fn target(&mut self, target: f32) {
         if self.target != target {
             self.origin = self.current;
+            self.initial_velocity = self.velocity;
             self.target = target;
             self.elapsed = 0.0;
         }
@@ -43,8 +46,19 @@ impl ScrollState {
         } else {
             (self.elapsed / duration).clamp(0.0, 1.0)
         };
-        let eased = t * t * (3.0 - 2.0 * t);
-        self.current = self.origin + (self.target - self.origin) * eased;
+        if t >= 1.0 {
+            self.current = self.target;
+            self.velocity = 0.0;
+            return;
+        }
+        // Minimum-jerk interpolation with the incoming velocity retained when a
+        // fast lyric or manual scroll retargets an unfinished transition.
+        let distance = self.target - self.origin;
+        let eased = t * t * t * (10.0 + t * (-15.0 + 6.0 * t));
+        let tangent = t + t * t * t * (-6.0 + t * (8.0 - 3.0 * t));
+        self.current = self.origin + distance * eased + self.initial_velocity * duration * tangent;
+        self.velocity = distance * (30.0 * t * t * (1.0 - t) * (1.0 - t)) / duration
+            + self.initial_velocity * (1.0 + t * t * (-18.0 + t * (32.0 - 15.0 * t)));
     }
 }
 #[derive(Clone, Debug)]
@@ -222,6 +236,26 @@ mod tests {
         let old = s.current;
         s.target(8.0);
         assert_eq!(s.current, old);
+    }
+    #[test]
+    fn retarget_preserves_velocity_and_uninterrupted_motion_is_monotonic() {
+        let mut s = ScrollState::default();
+        s.target(1.0);
+        let mut previous = 0.0;
+        for _ in 0..20 {
+            s.advance(0.02, 0.8);
+            assert!(s.current >= previous);
+            previous = s.current;
+        }
+        let old_velocity = s.velocity;
+        let position = s.current;
+        s.target(2.0);
+        assert_eq!(s.current, position);
+        s.advance(0.0001, 0.8);
+        assert!((s.velocity - old_velocity).abs() < 0.01);
+        s.advance(1.0, 0.8);
+        assert_eq!(s.current, 2.0);
+        assert!(!s.animating());
     }
     #[test]
     fn hit_testing_accounts_for_pane_and_scrolled_line() {

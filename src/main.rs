@@ -1,4 +1,5 @@
 mod app;
+mod frame_pacing;
 
 use anyhow::Result;
 use app::App;
@@ -7,13 +8,18 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use frame_pacing::FramePacer;
 use lyrictty::{
     assets::AssetService,
     config::{self, Config},
     playback::{self, service::PlaybackService, PlaybackBackend},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::{env, io, path::PathBuf, time::Duration};
+use std::{
+    env, io,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 #[derive(Default)]
 struct Options {
@@ -62,6 +68,7 @@ impl Drop for ScreenGuard {
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
+            crossterm::terminal::EndSynchronizedUpdate,
             event::DisableMouseCapture,
             event::DisableBracketedPaste,
             LeaveAlternateScreen,
@@ -105,6 +112,7 @@ fn main() -> Result<()> {
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
+            crossterm::terminal::EndSynchronizedUpdate,
             event::DisableMouseCapture,
             LeaveAlternateScreen,
             crossterm::cursor::Show
@@ -121,18 +129,45 @@ fn main() -> Result<()> {
         event::EnableBracketedPaste
     )?;
     app.picker = ratatui_image::picker::Picker::from_query_stdio().ok();
+    app.setup_pixel_lyrics();
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    run(&mut terminal, &mut app)
+    let result = run(&mut terminal, &mut app);
+    app.cleanup_graphics(&mut io::stdout())?;
+    result
 }
 
 fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
+    let mut pacer = FramePacer::new(Instant::now(), u32::from(app.config.fps));
+    let mut idle = true;
+    let synchronized = app
+        .picker
+        .as_ref()
+        .is_some_and(|p| p.protocol_type() == ratatui_image::picker::ProtocolType::Kitty);
     loop {
         app.tick();
-        if app.dirty {
-            terminal.draw(|f| app.draw(f))?;
+        let now = Instant::now();
+        let active = app.dirty || app.animating();
+        if active && idle {
+            pacer.reset(now);
         }
-        let wait = if app.animating() {
-            Duration::from_millis(1000 / u64::from(app.config.fps))
+        idle = !active;
+        if app.dirty && pacer.wait(now).is_zero() {
+            if synchronized {
+                execute!(io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
+            }
+            let draw = (|| -> Result<()> {
+                terminal.draw(|f| app.draw(f))?;
+                app.flush_graphics(&mut io::stdout())?;
+                Ok(())
+            })();
+            if synchronized {
+                execute!(io::stdout(), crossterm::terminal::EndSynchronizedUpdate)?;
+            }
+            draw?;
+            pacer.presented(Instant::now(), u32::from(app.config.fps));
+        }
+        let wait = if app.animating() || app.dirty {
+            pacer.wait(Instant::now())
         } else {
             Duration::from_millis(200)
         };
@@ -140,7 +175,7 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) 
             match event::read()? {
                 Event::Key(key) if key.kind != event::KeyEventKind::Release => app.handle_key(key),
                 Event::Mouse(mouse) => app.handle_mouse(mouse),
-                Event::Resize(_, _) => app.dirty = true,
+                Event::Resize(_, _) => app.resize_graphics(),
                 Event::Paste(text) => app.handle_paste(&text),
                 _ => {}
             }

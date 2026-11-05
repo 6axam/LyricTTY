@@ -19,7 +19,7 @@ Spotify-like synced lyrics and adaptive music UI for your terminal.
 - Source Auto chooses the only playing source; simultaneous playback opens a selector.
 - Local enhanced LRC and Lyricsfile JSON/YAML; online **LRCLIB** with word → line → plain → no-lyrics fallback and disk caching.
 - Actual word timestamps drive completed/current/future word colors and partial word progress. Ordinary LRC is never given invented word timing.
-- Eased lyric movement with fractional-row intensity blending, Unicode-aware wrapping, and rendered hit regions for line/word seek.
+- Pixel-smooth lyrics in Kitty: cached text images move at sub-cell offsets with larger typography and no doubled rows. Other terminals keep eased row blending. Both paths retain line/word seek.
 - Mouse seeking, manual lyric browsing, return to LIVE, and a minimal karaoke layout.
 - Cached artwork, dominant-color dark themes with contrast checks, smooth theme transitions, and Kitty Graphics (truecolor halfblocks elsewhere).
 - Instrumental state transitions with a lightweight ambient animation.
@@ -31,7 +31,7 @@ Linux with a Rust toolchain, session D-Bus, and a truecolor terminal. Kitty is r
 
 ```bash
 # Arch / Omarchy: install native playback dependencies
-sudo pacman -S --needed rust mpv yt-dlp
+sudo pacman -S --needed rust mpv yt-dlp fontconfig
 git clone https://github.com/6axam/LyricTTY.git
 cd LyricTTY
 ./install.sh
@@ -84,11 +84,17 @@ lyrictty --demo
 
 The included [authored timing fixture](examples/demo.lrc) has real explicit word cues, Cyrillic, and an instrumental gap. It is deliberately silent and labeled as a demo. For music, pass your own timestamped file with `--lyrics` alongside a native URL or active browser source. LRCLIB word timing is used only when the server supplies a valid Lyricsfile; most records remain line-synced.
 
+[Kitty pixel scrolling — actual 60 FPS recording](assets/smooth-lyrics.mp4)
+
+Portable terminal fallback preview:
+
 ![Word highlighting and lyric movement](assets/lyrics-scroll.gif)
 
 ## Configuration and performance
 
-Settings live in `~/.config/lyrictty/config.toml`; `,` edits the main options and saves immediately. Defaults: 30 FPS, 850ms lyric movement, 900ms theme transition, and eight-second manual-follow timeout. Paused static screens are not redrawn continuously. Use 15 FPS and low-data mode to reduce work; low-data mode skips artwork downloads.
+Settings live in `~/.config/lyrictty/config.toml`; `,` edits the main options and saves immediately. Defaults: 60 FPS while animating, 850ms lyric movement, 900ms theme transition, and eight-second manual-follow timeout. Frame deadlines account for drawing time, and paused static screens are not redrawn continuously. Use 15/30 FPS and low-data mode to reduce work; low-data mode skips artwork downloads.
+
+`pixel_lyrics = true` enables the smooth Kitty path when Kitty Graphics and a suitable system font are available. Font discovery uses `fontconfig` (`fc-match`); `LYRICTTY_LYRICS_FONT` can select a local TTF/OTF. Unsupported scripts, emoji/combining graphemes, tmux and other terminals fall back to the terminal renderer. Pixel lyrics are images; disable the option for terminal text selection or screen readers. The setting can be changed live in `,`.
 
 See [all settings](docs/configuration.md), [architecture](docs/architecture.md), and [verification notes](docs/acceptance.md).
 
@@ -98,9 +104,9 @@ See [all settings](docs/configuration.md), [architecture](docs/architecture.md),
 - If colors are missing, check `NO_COLOR`. That environment variable is respected.
 - yt-dlp/YouTube availability and extraction speed vary. Update yt-dlp through your package manager when extraction fails.
 - Lyrics availability and community timing quality vary. Displayed video titles are conservatively normalized for catalog lookup; Live/Remix qualifiers are preserved.
-- Terminal glyphs occupy whole cells. The ANSI lyric renderer blends adjacent rows instead of claiming pixel-level font movement; intermediate frames may have a soft doubled edge.
+- Outside Kitty's pixel renderer, terminal glyphs occupy whole cells. The ANSI fallback blends adjacent rows and may have a soft doubled edge. In Kitty, set FPS to 60 and enable Pixel lyrics in `,` for the smoothest available mode.
 - Instrumental detection uses explicit cue gaps or a conservative estimate after line starts. The ambient bars are **not** audio FFT. PipeWire/CAVA capture is future work.
-- Karaoke minimizes the interface but uses the terminal's existing font size.
+- Karaoke minimizes the interface; Kitty pixel lyrics also use larger type. The terminal fallback uses the terminal's font size.
 - A session D-Bus restart requires restarting LyricTTY. Individual player disappearance/replacement is handled live.
 - Session/queue persistence, a queue editor, catalog search and account/library features remain outside this development milestone.
 

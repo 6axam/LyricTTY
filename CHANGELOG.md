@@ -2,6 +2,9 @@
 
 ## Unreleased — development / pre-release
 
+- Added actual pixel-positioned lyrics in Kitty, cached glyph/line images, larger type and preserved word/line hit regions.
+- Improved animation pacing, minimum-jerk movement and retarget velocity continuity; defaults now use 60 FPS while animated.
+
 - Fixed warnings-as-errors CI; no global dead-code suppression.
 - Added direct, signal-driven MPRIS discovery/control and source selection.
 - Added owned mpv JSON IPC playback, yt-dlp URLs, metadata, playlist transport and cleanup.

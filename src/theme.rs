@@ -94,7 +94,7 @@ impl ThemeTransition {
         } else {
             (self.elapsed / self.duration).clamp(0.0, 1.0)
         };
-        let t = t * t * (3.0 - 2.0 * t);
+        let t = t * t * t * (10.0 + t * (-15.0 + 6.0 * t));
         Palette {
             bg: mix(self.from.bg, self.to.bg, t),
             panel: mix(self.from.panel, self.to.panel, t),
