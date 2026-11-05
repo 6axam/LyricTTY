@@ -517,12 +517,8 @@ impl App {
                     self.artwork = Some(artwork);
                     self.cover_protocol = self.picker.as_ref().and_then(|picker| {
                         self.artwork.as_ref().map(|art| {
-                            let width = art
-                                .image
-                                .width()
-                                .min(art.image.height().saturating_mul(2))
-                                .max(1);
-                            let height = art.image.height().min(width / 2).max(1);
+                            let width = art.image.width().min(art.image.height()).max(1);
+                            let height = width;
                             let cropped = image::imageops::crop_imm(
                                 &art.image,
                                 (art.image.width() - width) / 2,
@@ -532,7 +528,7 @@ impl App {
                             )
                             .to_image();
                             let mut cover = image::DynamicImage::ImageRgb8(cropped).into_rgba8();
-                            let radius = (height as f32 * 0.075).max(1.0);
+                            let radius = (height as f32 * 0.045).max(1.0);
                             for (x, y, pixel) in cover.enumerate_pixels_mut() {
                                 let dx = (radius
                                     - (x as f32 + 0.5).min(width as f32 - x as f32 - 0.5))
@@ -1420,12 +1416,8 @@ fn draw_cover(f: &mut Frame, a: Rect, art: &Artwork) {
     if a.is_empty() {
         return;
     }
-    let width = art
-        .image
-        .width()
-        .min(art.image.height().saturating_mul(2))
-        .max(1);
-    let height = art.image.height().min(width / 2).max(1);
+    let width = art.image.width().min(art.image.height()).max(1);
+    let height = width;
     let crop = image::imageops::crop_imm(
         &art.image,
         (art.image.width() - width) / 2,

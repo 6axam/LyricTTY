@@ -36,12 +36,14 @@ pub fn areas_with_cell(a: Rect, karaoke: bool, cell: (u16, u16)) -> Areas {
         let available_h = a.height * 76 / 100;
         let aspect = cell.0.max(1) as f32 / cell.1.max(1) as f32;
         let mut left = usable * 53 / 100;
-        let mut artwork_h = (left as f32 * aspect / 2.0).round() as u16;
-        let mut panel_h = ((artwork_h as f32 * 0.66).round() as u16).max(8);
+        let mut artwork_h = (left as f32 * aspect).round() as u16;
+        let mut panel_h = ((artwork_h as f32 * 0.34).round() as u16).max(8);
         if artwork_h + panel_h + 1 > available_h {
-            artwork_h = available_h.saturating_sub(9).max(3);
-            panel_h = 8;
-            left = left.min((artwork_h as f32 * 2.0 / aspect) as u16);
+            artwork_h = ((available_h.saturating_sub(1) as f32 / 1.34).floor() as u16)
+                .min(available_h.saturating_sub(9))
+                .max(3);
+            panel_h = ((artwork_h as f32 * 0.34).round() as u16).max(8);
+            left = left.min((artwork_h as f32 / aspect).round() as u16);
         }
         let group_h = artwork_h + panel_h + 1;
         let y = a.y + a.height.saturating_sub(group_h) / 2;
