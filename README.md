@@ -112,6 +112,8 @@ If something is missing, start with `lyrictty doctor`. Check that the player sha
 
 [Configuration](docs/configuration.md) · [Word sync](docs/word-sync.md) · [Architecture](docs/architecture.md) · [Verification notes](docs/acceptance.md)
 
+[Known issues](docs/known-issues.md)
+
 [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [MIT license](LICENSE)
 
 CI checks formatting, Clippy, tests, a release build and CLI help. Queue editing, session persistence and account/library features remain outside the current milestone.
