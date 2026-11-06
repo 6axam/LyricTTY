@@ -45,6 +45,7 @@ struct Cached {
 #[derive(Deserialize)]
 struct Update {
     line: Option<usize>,
+    lines: Option<Vec<LyricLine>>,
     #[serde(default)]
     words: Vec<crate::lyrics::LyricWord>,
     status: Option<String>,
@@ -208,21 +209,25 @@ impl AlignmentHandle {
         cache: &Path,
         events: &Sender<AssetEvent>,
     ) -> anyhow::Result<()> {
-        if request.content.lines.is_empty()
-            || request.content.instrumental
-            || request.content.lines.iter().all(complete)
+        let plain = request.content.lines.is_empty();
+        if request.content.instrumental
+            || (plain && request.content.plain.trim().is_empty())
+            || (!plain && request.content.lines.iter().all(complete))
         {
             return Ok(());
         }
         fs::create_dir_all(cache)?;
         let identity = crate::metadata::lyrics_query(&request.track);
-        let fingerprint = serde_json::to_vec(&(
+        let mut fingerprint = serde_json::to_vec(&(
             &identity.artist,
             &identity.title,
             &identity.album,
             request.track.duration.round() as i64,
             &request.content.lines,
         ))?;
+        if plain {
+            fingerprint.extend(serde_json::to_vec(&("plain-v1", &request.content.plain))?);
+        }
         let path = cache.join(format!("{:x}.json", Sha256::digest(fingerprint)));
         let legacy = serde_json::to_vec(&(
             &request.track.artist,
@@ -237,7 +242,16 @@ impl AlignmentHandle {
         if let Ok(bytes) = fs::read(&path).or_else(|_| fs::read(&legacy_path)) {
             if bytes.len() <= 4 * 1024 * 1024 {
                 if let Ok(cached) = serde_json::from_slice::<Cached>(&bytes) {
-                    if cached.lines.len() == content.lines.len() {
+                    if plain
+                        && cached.prepared
+                        && valid_plain_lines(&content.plain, &cached.lines, request.track.duration)
+                    {
+                        content.lines = cached.lines;
+                        publish(events, &request.key, &content);
+                        report(events, &request.key, "По словам · полная разметка из кэша");
+                        return Ok(());
+                    }
+                    if !plain && cached.lines.len() == content.lines.len() {
                         for (base, saved) in content.lines.iter_mut().zip(cached.lines) {
                             if base.text == saved.text
                                 && base.start == saved.start
@@ -260,7 +274,7 @@ impl AlignmentHandle {
                 }
             }
         }
-        if content.lines.iter().all(complete) {
+        if !plain && content.lines.iter().all(complete) {
             report(events, &request.key, "По словам · сохранённые тайминги");
             return Ok(());
         }
@@ -285,7 +299,7 @@ impl AlignmentHandle {
         fs::write(
             &input,
             serde_json::to_vec(
-                &serde_json::json!({"lines":content.lines, "track":request.track, "work_dir":temp.path(), "position":0.0, "playing":false, "rate":1.0}),
+                &serde_json::json!({"lines":content.lines, "plain":if plain { Some(&content.plain) } else { None }, "track":request.track, "work_dir":temp.path(), "position":0.0, "playing":false, "rate":1.0}),
             )?,
         )?;
         let log = temp.path().join("error.log");
@@ -357,6 +371,7 @@ impl AlignmentHandle {
                         "decoding_audio" => "Подготавливаю звук для анализа…",
                         "loading_model" => "Загружаю модель…",
                         "aligning_lyrics" => "Сопоставляю слова с аудио…",
+                        "aligning_plain" => "Определяю тайминги текста без разметки…",
                         retry if retry.starts_with("retrying_line_") => {
                             "Уточняю тайминги сложной строки…"
                         }
@@ -366,6 +381,12 @@ impl AlignmentHandle {
                 }
                 if update.prepared {
                     prepared = true;
+                }
+                if let Some(lines) = update.lines {
+                    if plain && valid_plain_lines(&content.plain, &lines, request.track.duration) {
+                        content.lines = lines;
+                        publish(events, &request.key, &content);
+                    }
                 }
                 let Some(index) = update.line else {
                     continue;
@@ -416,7 +437,7 @@ impl AlignmentHandle {
             return Ok(());
         }
         anyhow::ensure!(
-            prepared && content.lines.iter().all(complete),
+            prepared && !content.lines.is_empty() && content.lines.iter().all(complete),
             "полная разметка не получена: часть слов не имеет корректных таймингов"
         );
         save(cache, &path, &content, true)?;
@@ -432,6 +453,24 @@ impl AlignmentHandle {
         );
         Ok(())
     }
+}
+fn valid_plain_lines(plain: &str, lines: &[LyricLine], duration: f64) -> bool {
+    !lines.is_empty()
+        && lines.len() <= 4096
+        && lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .eq(plain.lines().filter(|line| !line.trim().is_empty()))
+        && lines.iter().all(|line| {
+            line.start.is_finite()
+                && line.end.is_finite()
+                && line.start >= 0.0
+                && line.end >= line.start
+                && line.end as f64 <= duration + 0.001
+                && valid_words(line, &line.words)
+                && complete(line)
+        })
+        && lines.windows(2).all(|pair| pair[0].start <= pair[1].start)
 }
 fn matched_words(content: &LyricsContent) -> usize {
     content

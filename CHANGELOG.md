@@ -2,6 +2,8 @@
 
 ## Unreleased — development / pre-release
 
+- Prefer synchronized matching lyrics over a plain-text result, and prepare acoustic word timings for text without line timestamps.
+- Render untimed lyrics at the normal large size; broaden bounded audio search and ignore album/presentation decorations while retaining recording-version and duration checks.
 - Refreshed the project identity, README, current demo screenshot and word-sync guide.
 - Buffered complete terminal frames and alternated Kitty image slots so uploads keep the previous card and lyric lines visible.
 - Added local stable-ts / multilingual Whisper CPU alignment, persistent word cues and preparation of up to three known upcoming tracks.

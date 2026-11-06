@@ -537,8 +537,11 @@ impl LyricsService {
             .cache
             .as_ref()
             .filter(|_| self.providers.iter().all(|p| p.cacheable()));
-        if let Some(document) = cache.and_then(|cache| cache.get(&key)) {
-            return Ok(document);
+        let cached = cache.and_then(|cache| cache.get(&key));
+        if let Some(document) = &cached {
+            if document.quality != LyricsQuality::Plain {
+                return Ok(document.clone());
+            }
         }
         let mut errors = Vec::new();
         for provider in &self.providers {
@@ -560,6 +563,11 @@ impl LyricsService {
                 Ok(None) => (),
                 Err(error) => errors.push(format!("{}: {error:#}", provider.name())),
             }
+        }
+        // A cached plain-text fallback must not suppress a newly available
+        // synchronized release, but remains useful when the provider is down.
+        if let Some(document) = cached {
+            return Ok(document);
         }
         if !errors.is_empty() {
             bail!("{}", errors.join("; "));
@@ -747,10 +755,7 @@ impl LyricsProvider for LrclibProvider {
                 // Community records occasionally contain a single test cue for
                 // an otherwise complete song. Keep it as fallback while checking
                 // matching releases, rather than declaring lookup complete.
-                if document.quality == LyricsQuality::Line
-                    && document.lines.len() < 3
-                    && track.duration > 60.0
-                {
+                if document_score(&document, track) < 3 {
                     provisional = Some(document);
                 } else {
                     return Ok(Some(document));
@@ -766,7 +771,7 @@ impl LyricsProvider for LrclibProvider {
         };
         let records: Vec<LrclibRecord> =
             serde_json::from_value(value).context("Invalid LRCLIB search response")?;
-        if records.len() > 20 {
+        if records.len() > 1000 {
             bail!("LRCLIB returned too many search results");
         }
         let mut matching: Vec<_> = records
@@ -783,10 +788,28 @@ impl LyricsProvider for LrclibProvider {
         });
         for record in matching {
             if let Some(document) = record_document(record)? {
-                return Ok(Some(document));
+                if provisional
+                    .as_ref()
+                    .is_none_or(|old| document_score(&document, track) > document_score(old, track))
+                {
+                    provisional = Some(document);
+                }
             }
         }
         Ok(provisional)
+    }
+}
+
+fn document_score(document: &LyricsDocument, track: &Track) -> u8 {
+    if document.instrumental {
+        return 5;
+    }
+    match document.quality {
+        LyricsQuality::Word => 4,
+        LyricsQuality::Line if document.lines.len() >= 3 || track.duration <= 60.0 => 3,
+        LyricsQuality::Line => 2,
+        LyricsQuality::Plain => 1,
+        LyricsQuality::None => 0,
     }
 }
 

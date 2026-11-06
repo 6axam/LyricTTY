@@ -991,14 +991,51 @@ impl App {
                 "No synchronized lyrics available\n\nLocal word timing: lyrictty --lyrics song.lrc"
                     .into()
             };
-            f.render_widget(
-                Paragraph::new(message)
-                    .wrap(Wrap { trim: false })
-                    .scroll((self.plain_scroll, 0))
-                    .alignment(Alignment::Center)
-                    .style(Style::default().fg(p.muted)),
-                padded(inner, 2),
-            );
+            if !self.content.plain.trim().is_empty()
+                && self.config.pixel_lyrics
+                && self.overlay == Overlay::None
+            {
+                // Display untimed text with the same typography, without
+                // publishing fake timestamps or enabling seek-to-word hits.
+                let lines: Vec<_> = self
+                    .content
+                    .plain
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|text| lyrics::LyricLine {
+                        text: text.into(),
+                        start: 0.0,
+                        end: 0.0,
+                        words: Vec::new(),
+                    })
+                    .collect();
+                if let Some(renderer) = &mut self.pixel_lyrics {
+                    if renderer.supports(&lines)
+                        && renderer
+                            .prepare(
+                                inner,
+                                &lines,
+                                self.plain_scroll as f32,
+                                0.0,
+                                p,
+                                self.karaoke,
+                            )
+                            .is_ok()
+                    {
+                        self.pixel_active = true;
+                    }
+                }
+            }
+            if !self.pixel_active {
+                f.render_widget(
+                    Paragraph::new(message)
+                        .wrap(Wrap { trim: false })
+                        .scroll((self.plain_scroll, 0))
+                        .alignment(Alignment::Left)
+                        .style(Style::default().fg(p.muted)),
+                    padded(inner, 2),
+                );
+            }
         } else {
             let mut faded = p;
             faded.fg = theme::mix(p.fg, p.bg, self.instrumental.intensity * 0.93);

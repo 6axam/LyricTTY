@@ -122,7 +122,9 @@ impl AssetService {
                     {
                         break;
                     }
-                    if document.lines.is_empty() || document.instrumental {
+                    if (document.lines.is_empty() && document.plain.trim().is_empty())
+                        || document.instrumental
+                    {
                         continue;
                     }
                     let content = LyricsContent {

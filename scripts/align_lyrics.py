@@ -154,6 +154,60 @@ def result_words(result):
     return [word for segment in result.to_dict()["segments"] for word in segment.get("words", [])]
 
 
+def align_plain(audio, text, model, language):
+    """Find real acoustic bounds for existing text that has no line anchors."""
+    from prepare_audio import status
+    status("aligning_plain")
+    whole = Line(dict(text=text, start=0.0, end=len(audio) / RATE))
+    reason = "no acoustic word cues"
+    for heads in (False, True):
+        try:
+            with redirect_stdout(sys.stderr):
+                result = model.align(audio, text, language=language,
+                                     remove_instant_words=False, original_split=True,
+                                     nonspeech_skip=None, word_dur_factor=None,
+                                     max_word_dur=None, failure_threshold=1.0,
+                                     dynamic_heads=heads, **OPTIONS)
+            mapped = whole.map_words(result_words(result))
+            break
+        except Exception as error:
+            reason = str(error)
+    else:
+        raise CoverageError(f"plain-text alignment incomplete: {reason}")
+    # Slice the original character sequence, not the tokenizer's spelling or
+    # segmentation. Each visible source line survives byte-for-byte.
+    spans, cursor = [], 0
+    for word in mapped:
+        spans.append((cursor, cursor + len(word["text"]), word))
+        cursor += len(word["text"])
+    lines, cursor = [], 0
+    for raw in text.splitlines(keepends=True):
+        body = raw.rstrip("\r\n")
+        if body.strip():
+            words = []
+            for first, last, word in spans:
+                left, right = max(first, cursor), min(last, cursor + len(body))
+                if left < right:
+                    piece = dict(word)
+                    piece["text"] = body[left - cursor:right - cursor]
+                    words.append(piece)
+            voiced = [w for w in words if LEXICAL.search(w["text"])]
+            start = min(w["start"] for w in (voiced or words))
+            end = max(w["end"] for w in (voiced or words))
+            for word in words:
+                if not LEXICAL.search(word["text"]):
+                    word["start"] = word["end"] = min(end, max(start, word["start"]))
+            # The whole-song mapper already checked acoustic spans and point
+            # neighbors, which can straddle a line boundary. Retain those cues.
+            if "".join(word["text"] for word in words) != body:
+                raise CoverageError("plain line text reconstruction failed")
+            lines.append(dict(text=body, start=start, end=end, words=words))
+        cursor += len(raw)
+    if not lines:
+        raise CoverageError("plain lyrics contain no visible lines")
+    emit(dict(lines=lines, prepared=True))
+
+
 def run(request, lines, model, np):
     from prepare_audio import prepare_audio, status
 
@@ -162,14 +216,16 @@ def run(request, lines, model, np):
         raise ValueError("work_dir must name an existing temporary directory")
     language = request.get("language")
     if language is None:
-        language = "ru" if any(re.search(r"[А-Яа-яЁё]", line.text) for line in lines) else "en"
+        text = request.get("plain") or "\n".join(line.text for line in lines)
+        language = "ru" if re.search(r"[А-Яа-яЁё]", text) else "en"
     if language not in ("ru", "en"):
         raise ValueError("language must be ru or en")
     total = sum(len(line.lexemes) for line in lines)
     matched, failures = 0, []
     failure_reasons = []
     with tempfile.TemporaryDirectory(prefix="alignment-", dir=parent) as temporary:
-        pending = any(line.words is None for line in lines)
+        plain = request.get("plain") if not lines else None
+        pending = bool(plain) or any(line.words is None for line in lines)
         audio = None
         if pending:
             path = prepare_audio(request["track"], Path(temporary))
@@ -177,6 +233,9 @@ def run(request, lines, model, np):
                 if (stream.getnchannels(), stream.getsampwidth(), stream.getframerate()) != (1, 2, RATE):
                     raise ValueError("prepared audio must be mono 16 kHz PCM16")
                 audio = np.frombuffer(stream.readframes(stream.getnframes()), dtype="<i2").astype(np.float32) / 32768.0
+        if plain:
+            align_plain(audio, plain, model, language)
+            return
         status("aligning_lyrics")
         for index, line in enumerate(lines):
             reason = ""

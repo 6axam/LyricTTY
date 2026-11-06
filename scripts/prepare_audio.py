@@ -67,20 +67,47 @@ def artist_key(value):
     return "".join(table.get(c, c) for c in normalized(value) if c != " ")
 
 
+def recording_title(value, album=""):
+    # Strip presentation labels only; retain live/remix/acoustic/version words.
+    labels = {"official audio", "official video", "official music video", "audio", "hq", "hd"}
+    if album:
+        labels.add(normalized(album))
+    def decoration(match):
+        label = match.group(1).strip()
+        return " " if normalized(label) in labels or label.startswith("@") else match.group()
+    value = re.sub(r"[\[(]([^()\[\]]*)[\])]", decoration, value)
+    value = normalized(value)
+    value = re.sub(r"\bofficial\s*(?:audio|video)\b|\bhq\b", " ", value)
+    return " ".join(value.split())
+
+
 def candidate_matches(item, track, expected):
-    title, artist = normalized(track.get("title") or ""), normalized(track.get("artist") or "")
+    title, artist = recording_title(track.get("title") or ""), normalized(track.get("artist") or "")
     if not title or not artist or expected is None or item.get("is_live"):
         return False
     try:
         check_duration(duration_value(item.get("duration")), expected)
     except (TypeError, ValueError):
         return False
-    candidate_title = normalized(item.get("title") or "")
-    artists = [normalized(item.get(key) or "") for key in ("artist", "creator", "uploader", "channel")]
+    candidate_title = recording_title(item.get("title") or "", track.get("album") or "")
+    # Structured music metadata takes precedence over channel branding. Still
+    # validate the video title so metadata cannot hide a live/remix qualifier.
+    if item.get("track") and recording_title(item["track"]) != title:
+        return False
+    artists = item.get("artists") or []
+    if not isinstance(artists, list):
+        artists = []
+    artists = [name for name in [item.get("artist"), *artists] if isinstance(name, str) and name]
+    structured_artists = bool(artists)
+    if not artists:
+        artists = [item.get(key) or "" for key in ("creator", "uploader", "channel")]
+    artists = [normalized(name) for name in artists]
     artists = [name.removesuffix(" topic").strip() for name in artists]
     artist_matches = any(artist_key(name) == artist_key(artist) for name in artists)
+    if structured_artists and not artist_matches:
+        return False
     # An explicit artist-title video title is also acceptable, without dropping
-    # any parenthetical/version words or allowing fuzzy similarity.
+    # any version words or allowing fuzzy similarity.
     return ((candidate_title == title and artist_matches)
             or candidate_title in (f"{artist} {title}", f"{title} {artist}"))
 
@@ -116,14 +143,26 @@ def prepare_audio(track, work):
         artist_title = f"{track['artist']} {track['title']}"
         album_query = f"{artist_title} {track.get('album') or ''} provided to youtube"
         candidate = None
-        for query in (album_query, artist_title):
-            results = json.loads(run(common + ["--dump-single-json", "--skip-download", "--flat-playlist",
-                "--playlist-end", "5", "--", f"ytsearch5:{query}"], 40))
-            candidate = next((item for item in results.get("entries", [])[:5]
+        search_errors = []
+        successful_searches = 0
+        for query in (album_query, artist_title, f"{artist_title} {track.get('album') or ''} audio"):
+            try:
+                results = json.loads(run(common + ["--dump-single-json", "--skip-download", "--flat-playlist",
+                    "--playlist-end", "10", "--", f"ytsearch10:{query}"], 40))
+                if not isinstance(results, dict) or not isinstance(results.get("entries"), list):
+                    raise ValueError("yt-dlp returned invalid search metadata")
+            except (RuntimeError, ValueError) as error:
+                search_errors.append(str(error))
+                continue
+            successful_searches += 1
+            candidate = next((item for item in results["entries"][:10]
                               if isinstance(item, dict) and candidate_matches(item, track, expected)), None)
             if candidate is not None:
                 break
         if candidate is None:
+            if not successful_searches:
+                raise RuntimeError("all audio searches failed; check yt-dlp and network access: "
+                                   + " | ".join(search_errors))
             raise ValueError("no matching recording found; open the exact source URL or local file in LyricTTY")
         url = candidate.get("webpage_url") or candidate.get("original_url") or candidate.get("url")
         if not url or urlparse(url).scheme not in ("http", "https"):

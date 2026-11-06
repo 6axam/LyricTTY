@@ -20,6 +20,8 @@ Audio preparation requires `ffmpeg` and `ffprobe`, plus `yt-dlp` for public remo
 
 Stable-ts `align_words()` uses existing line timestamps as anchors. Original words, spelling, whitespace and punctuation are preserved. Failed lines are retried independently. Unresolved words produce a visible coverage error instead of uniform fabricated timestamps. A collapsed cue for a short particle can remain an explicit point cue between timed neighbors; no duration is invented.
 
+When the catalog supplies only plain text, LyricTTY first checks matching releases for synchronized lyrics. Otherwise it shows readable, manually scrollable text and aligns the existing words against the full audio with stable-ts `align()`. Complete acoustic word cues restore the original line breaks and enable following and seeking; the resulting timeline is cached. No evenly spaced line or word timestamps are synthesized.
+
 A full result is marked prepared only when all original lexical words have valid intervals or supported explicit point cues and the text reconstructs exactly. **100% text coverage does not establish exact acoustic timing.** Singing, accompaniment and inaccurate line boundaries can still impair alignment.
 
 ## CPU and cache
